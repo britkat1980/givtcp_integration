@@ -1,2 +1,3 @@
 * text=auto eol=lf
 *.capture binary
+*.png binary
