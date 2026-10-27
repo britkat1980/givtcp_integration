@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 venv/
 .coverage
+
+# The dev Home Assistant's own state; only its configuration.yaml is kept
+dev/config/*
+!dev/config/configuration.yaml

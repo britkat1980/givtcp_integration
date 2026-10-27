@@ -20,9 +20,11 @@ If your inverter isn't supported yet, setup tells you so and doesn't add it.
 
 1. In HACS, open the menu (⋮) → **Custom repositories**, add `https://github.com/britkat1980/givtcp_integration` as an **Integration**.
 2. Install **GivTCP**, then restart Home Assistant.
-3. Go to **Settings → Devices & services → Add integration → GivTCP**, and enter the inverter dongle's IP address (port 8899).
+3. Home Assistant finds most GivEnergy dongles on its own: look under **Settings → Devices & services → Discovered**, and choose **Add**. Otherwise go to **Settings → Devices & services → Add integration → GivTCP**: the dongles on your network are listed to choose from, or type the dongle's IP address (port 8899).
 
-Give the dongle a fixed IP address in your router. If its address changes, use **Reconfigure** on the integration to update it. Reconfiguring also detects the batteries and meters again, so do it after adding a battery.
+For a discovered dongle, Home Assistant follows it if its IP address changes. Otherwise, give the dongle a fixed IP address in your router, or use **Reconfigure** on the integration when it changes. Reconfiguring also detects the batteries and meters again, so do it after adding a battery.
+
+Discovery recognises dongles by the WiFi module GivEnergy uses, whose maker supplies other brands too. It checks that each one is a GivEnergy inverter before offering it.
 
 Setup takes up to a minute while it finds your batteries and meters. It only does this once.
 

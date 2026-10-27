@@ -3,7 +3,11 @@
   "name": "GivTCP",
   "codeowners": ["@britkat1980"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["network"],
+  "dhcp": [
+    { "macaddress": "34EAE7*" },
+    { "registered_devices": true }
+  ],
   "documentation": "https://github.com/britkat1980/givtcp_integration",
   "integration_type": "device",
   "iot_class": "local_polling",

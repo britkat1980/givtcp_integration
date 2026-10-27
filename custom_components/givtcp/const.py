@@ -11,6 +11,8 @@ CONF_FULL_REFRESH_INTERVAL = "full_refresh_interval"
 CONF_ENTITY_PREFIX = "entity_prefix"
 # What detect() found (PlantCapabilities.to_dict()), so a restart doesn't probe every battery and meter address
 CONF_CAPABILITIES = "capabilities"
+# The dongle's MAC address, from DHCP discovery: Home Assistant follows it to a new IP address
+CONF_MAC = "mac"
 
 DEFAULT_PORT = 8899
 DEFAULT_SCAN_INTERVAL = 30          # seconds between reads of the live (input) registers

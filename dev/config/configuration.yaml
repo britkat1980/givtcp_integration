@@ -1,0 +1,9 @@
+# Development Home Assistant: see dev/README.md
+default_config:
+
+logger:
+  default: warning
+  logs:
+    custom_components.givtcp: debug
+    givenergy_modbus: info
+    givenergy_modbus.testing: info

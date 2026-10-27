@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to your GivEnergy inverter",
-        "description": "Enter the address of the inverter's WiFi/LAN dongle. Give it a fixed IP address in your router so it doesn't change.",
+        "description": "Choose the inverter's WiFi/LAN dongle from the ones found on your network, or type its IP address. Give it a fixed IP address in your router, or let Home Assistant follow it if it changes (it does for dongles it discovers).",
         "data": {
           "host": "IP address",
           "port": "Port",
@@ -21,6 +21,16 @@
           "host": "IP address",
           "port": "Port"
         }
+      },
+      "discovery_confirm": {
+        "title": "Set up a discovered GivEnergy inverter",
+        "description": "Found {name} at {host}.",
+        "data": {
+          "entity_prefix": "Entity ID prefix"
+        },
+        "data_description": {
+          "entity_prefix": "Entity IDs start with this, then the serial number, as GivTCP's do (eg. sensor.givtcp_sa1234g567_soc). Keep the prefix you used in GivTCP so your dashboards, automations and Predbat keep working."
+        }
       }
     },
     "error": {
@@ -31,8 +41,11 @@
     "abort": {
       "already_configured": "This inverter is already set up.",
       "reconfigure_successful": "The inverter's address has been updated.",
-      "wrong_inverter": "That address is a different inverter. Add it as a new one instead."
-    }
+      "wrong_inverter": "That address is a different inverter. Add it as a new one instead.",
+      "not_givenergy": "That device isn't a GivEnergy inverter.",
+      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase hybrids, AC-coupled and All-in-One inverters are; keep using the GivTCP add-on for the others for now."
+    },
+    "flow_title": "{name}"
   },
   "options": {
     "step": {
@@ -72,40 +85,70 @@
       "name": "Force charge",
       "description": "Charge the battery from the grid at full rate to 100% for a while, through charge slot 1, then put the settings back.",
       "fields": {
-        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
-        "minutes": {"name": "Minutes", "description": "How long for."}
+        "config_entry_id": {
+          "name": "Inverter",
+          "description": "Which inverter, if you have more than one."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long for."
+        }
       }
     },
     "force_export": {
       "name": "Force export",
       "description": "Discharge the battery to the grid at full power for a while, through discharge slot 1, then put the settings back.",
       "fields": {
-        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
-        "minutes": {"name": "Minutes", "description": "How long for."}
+        "config_entry_id": {
+          "name": "Inverter",
+          "description": "Which inverter, if you have more than one."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long for."
+        }
       }
     },
     "pause_charge": {
       "name": "Pause charge",
       "description": "Stop the battery charging for a while, by setting the charge rate to 0, then put the rate back.",
       "fields": {
-        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
-        "minutes": {"name": "Minutes", "description": "How long for."}
+        "config_entry_id": {
+          "name": "Inverter",
+          "description": "Which inverter, if you have more than one."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long for."
+        }
       }
     },
     "pause_discharge": {
       "name": "Pause discharge",
       "description": "Stop the battery discharging for a while, by setting the discharge rate to 0, then put the rate back.",
       "fields": {
-        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
-        "minutes": {"name": "Minutes", "description": "How long for."}
+        "config_entry_id": {
+          "name": "Inverter",
+          "description": "Which inverter, if you have more than one."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long for."
+        }
       }
     },
     "cancel": {
       "name": "Cancel",
       "description": "End a force charge, force export or pause now, and put the settings back.",
       "fields": {
-        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
-        "operation": {"name": "Operation", "description": "Which one to end."}
+        "config_entry_id": {
+          "name": "Inverter",
+          "description": "Which inverter, if you have more than one."
+        },
+        "operation": {
+          "name": "Operation",
+          "description": "Which one to end."
+        }
       }
     }
   }

@@ -8,13 +8,13 @@ import logging
 from typing import Any
 
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
 
-from .const import CONF_ENTITY_PREFIX, DEFAULT_ENTITY_PREFIX, DOMAIN, MANUFACTURER
+from .const import CONF_ENTITY_PREFIX, CONF_MAC, DEFAULT_ENTITY_PREFIX, DOMAIN, MANUFACTURER
 from .coordinator import GivTCPCoordinator
 from .data import GivData
 
@@ -70,8 +70,11 @@ def device_info(coordinator: GivTCPCoordinator, source: Source) -> DeviceInfo:
     data = coordinator.data
     serial = data.serial
     if source.kind == "inverter":
+        mac = coordinator.config_entry.data.get(CONF_MAC)
         return DeviceInfo(
             identifiers={(DOMAIN, serial)},
+            # With the dongle's MAC on the device, DHCP discovery follows it to a new IP address
+            connections={(CONNECTION_NETWORK_MAC, mac)} if mac else set(),
             name=f"GivTCP {serial}",
             manufacturer=MANUFACTURER,
             model=data.inverter.get("Invertor_Type"),

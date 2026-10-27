@@ -1,0 +1,36 @@
+# A Home Assistant to develop and test the integration in, apart from your production one.
+# Start it with `docker compose up -d` in this folder, then open http://localhost:8124
+name: givtcp-dev
+
+services:
+  homeassistant:
+    # The same version as production, so what works here works there
+    image: ghcr.io/home-assistant/home-assistant:2026.10.4
+    container_name: givtcp-dev-ha
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8124:8123"     # this PC only, and not production's 8123
+    environment:
+      TZ: Europe/London
+    volumes:
+      - ./config:/config
+      # The integration's source, live: restart Home Assistant to pick up changes
+      - ../custom_components/givtcp:/config/custom_components/givtcp
+    depends_on:
+      - mockplant
+
+  # A simulated inverter, served from one of the test captures. Home Assistant reaches it at mockplant:8899.
+  # Choose the capture with CAPTURE (hybrid_gen1, hybrid_gen2, ac, all_in_one, ...), eg.
+  #   CAPTURE=all_in_one docker compose up -d
+  # Writes are acknowledged but don't change its values; each one is logged: docker compose logs -f mockplant
+  mockplant:
+    image: python:3.14-slim
+    container_name: givtcp-dev-mockplant
+    restart: unless-stopped
+    environment:
+      CAPTURE: ${CAPTURE:-hybrid_gen2}
+      PYTHONUNBUFFERED: "1"
+    command: sh -c "pip install -q --root-user-action=ignore --disable-pip-version-check givenergy-modbus==2.13.0 && python /mock/serve.py"
+    volumes:
+      - ../tests/fixtures:/captures:ro
+      - ./mockplant:/mock:ro

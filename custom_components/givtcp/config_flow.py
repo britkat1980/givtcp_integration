@@ -12,12 +12,16 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
+from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.util import slugify
 
 from .const import (
     CONF_CAPABILITIES,
     CONF_ENTITY_PREFIX,
     CONF_FULL_REFRESH_INTERVAL,
+    CONF_MAC,
     DEFAULT_ENTITY_PREFIX,
     DEFAULT_FULL_REFRESH_INTERVAL,
     DEFAULT_PORT,
@@ -27,6 +31,7 @@ from .const import (
 )
 from .coordinator import GivTCPConfigEntry, close_client
 from .data import unsupported_reason
+from .discovery import port_open, scan_for_dongles
 from .modbus import GivTCPClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,18 +63,71 @@ async def identify(host: str, port: int) -> tuple[str, str, dict[str, Any]]:
     return client.plant.inverter_serial, caps.device_type.name, caps.to_dict()
 
 
-def _user_schema(defaults: dict[str, Any]) -> vol.Schema:
+def _user_schema(defaults: dict[str, Any], found: list[str] | None = None) -> vol.Schema:
+    host: Any = str
+    if found:
+        # The dongles a scan found, or type another address
+        host = SelectSelector(SelectSelectorConfig(options=found, custom_value=True, mode=SelectSelectorMode.DROPDOWN))
     return vol.Schema({
-        vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, "")): str,
+        vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, found[0] if found else "")): host,
         vol.Required(CONF_PORT, default=defaults.get(CONF_PORT, DEFAULT_PORT)): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)),
     })
+
+
+def _title(model: str, serial: str) -> str:
+    return f"GivEnergy {model.replace('_', ' ').title()} {serial}"
 
 
 class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up a GivEnergy inverter."""
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        self._found: list[str] | None = None
+        self._discovered: dict[str, Any] = {}
+
+    async def async_step_dhcp(self, discovery_info: DhcpServiceInfo) -> ConfigFlowResult:
+        """A device with a GivEnergy dongle's WiFi module turned up on the network.
+
+        Its MAC prefix is the module maker's, which other brands' loggers use too, so ask it for an inverter
+        serial number before offering it.
+        """
+        host, mac = discovery_info.ip, format_mac(discovery_info.macaddress)
+        # A dongle already set up: follow it to its new address, without bothering it with Modbus
+        for entry in self._async_current_entries(include_ignore=False):
+            known = entry.data.get(CONF_MAC)
+            if known == mac or (known is None and entry.data.get(CONF_HOST) == host):
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={CONF_HOST: host, CONF_MAC: mac}, reason="already_configured",
+                    reload_even_if_entry_is_unchanged=False)
+        await self.async_set_unique_id(mac)     # until the serial is known, so the same device isn't probed twice
+        self._abort_if_unique_id_configured()
+        if not await port_open(host):
+            return self.async_abort(reason="not_givenergy")
+        try:
+            serial, model, caps = await identify(host, DEFAULT_PORT)
+        except CannotConnect:
+            return self.async_abort(reason="not_givenergy")
+        except Unsupported as err:
+            return self.async_abort(reason="unsupported", description_placeholders={"reason": str(err)})
+        await self.async_set_unique_id(serial, raise_on_progress=False)
+        self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_MAC: mac})
+        self._discovered = {CONF_HOST: host, CONF_PORT: DEFAULT_PORT, CONF_MAC: mac, CONF_CAPABILITIES: caps,
+                            "title": _title(model, serial)}
+        self.context["title_placeholders"] = {"name": self._discovered["title"]}
+        return await self.async_step_discovery_confirm()
+
+    async def async_step_discovery_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            data = {k: v for k, v in self._discovered.items() if k != "title"}
+            data[CONF_ENTITY_PREFIX] = slugify(user_input.get(CONF_ENTITY_PREFIX) or DEFAULT_ENTITY_PREFIX)
+            return self.async_create_entry(title=self._discovered["title"], data=data)
+        return self.async_show_form(
+            step_id="discovery_confirm",
+            data_schema=vol.Schema({vol.Optional(CONF_ENTITY_PREFIX, default=DEFAULT_ENTITY_PREFIX): str}),
+            description_placeholders={"name": self._discovered["title"], "host": self._discovered[CONF_HOST]})
 
     async def _validate(self, user_input: dict[str, Any], errors: dict[str, str],
                         placeholders: dict[str, str]) -> tuple[str, str, dict[str, Any]] | None:
@@ -97,10 +155,14 @@ class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
                                                              CONF_PORT: user_input[CONF_PORT]})
                 prefix = slugify(user_input.get(CONF_ENTITY_PREFIX) or DEFAULT_ENTITY_PREFIX)
                 return self.async_create_entry(
-                    title=f"GivEnergy {model.replace('_', ' ').title()} {serial}",
+                    title=_title(model, serial),
                     data={CONF_HOST: user_input[CONF_HOST], CONF_PORT: user_input[CONF_PORT],
                           CONF_ENTITY_PREFIX: prefix, CONF_CAPABILITIES: caps})
-        schema = _user_schema(user_input or {}).extend({
+        if self._found is None:
+            # Offer the dongles on the network, less those already set up
+            configured = {entry.data.get(CONF_HOST) for entry in self._async_current_entries()}
+            self._found = [h for h in await scan_for_dongles(self.hass) if h not in configured]
+        schema = _user_schema(user_input or {}, self._found).extend({
             vol.Optional(CONF_ENTITY_PREFIX, default=DEFAULT_ENTITY_PREFIX): str,
         })
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors,
