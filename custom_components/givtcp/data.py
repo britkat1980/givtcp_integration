@@ -12,12 +12,14 @@ from datetime import datetime, timedelta, tzinfo
 import logging
 from typing import Any
 
+from givenergy_modbus.model.hv_bcu import Bmu, decode_cells_temps_serial
 from givenergy_modbus.model.inverter import Model, SinglePhaseInverterRegisterGetter
 from givenergy_modbus.model.plant import Plant
 from givenergy_modbus.model.register import IR
+from givenergy_modbus.model.register_cache import RegisterCache
 
 from .const import BATTERY_CALIBRATION, BATTERY_PAUSE_MODES, MIN_SOC, ROUNDING_DIP_KWH, TODAY_RESET_WINDOW_MINUTES
-from .modbus import PAUSE_SLOT_REGISTERS, pause_registers
+from .modbus import PAUSE_SLOT_REGISTERS, hv_stack_modules, pause_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -370,6 +372,24 @@ def get_timeslots(plant: Plant, previous: GivData | None) -> tuple[dict[str, str
     return timeslots, targets
 
 
+def _stack_modules(plant: Plant, index: int, hvstack) -> list:
+    """An HV stack's battery modules.
+
+    The library decodes the second and later stacks' modules from addresses that hold nothing, so decode those
+    from where GivTCPClient reads them: module k at 0x50 + k, offset 120 registers a stack.
+    """
+    caps = plant.capabilities
+    if index >= len(caps.bcu_stacks):
+        return list(hvstack.bmus)
+    offset = caps.bcu_stacks[index][0]
+    layout = [(k, address, base) for o, k, address, base in hv_stack_modules(caps) if o == offset]
+    if offset == 0 or not layout:
+        return list(hvstack.bmus)
+    return [Bmu.model_validate({**decode_cells_temps_serial(plant.register_caches.get(address, RegisterCache()),
+                                                           base=base - 60), "bmu_index": k})
+            for k, address, base in layout]
+
+
 def get_batteries(plant: Plant, previous: GivData | None, data: GivData) -> None:
     """Port of GivTCP's getBatteries: fills data.batteries, data.stacks and data.battery_stack."""
     inv = plant.inverter
@@ -455,7 +475,7 @@ def get_batteries(plant: Plant, previous: GivData | None, data: GivData) -> None
         if bcu.total_temperature_sensor_count and modules:
             num_temps = max(1, min(24, bcu.total_temperature_sensor_count // modules))
         temps = []
-        for b in hvstack.bmus:
+        for b in _stack_modules(plant, num - 1, hvstack):
             if not b.is_valid():
                 continue
             battery = {"Battery_Serial_Number": b.serial_number}

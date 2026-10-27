@@ -9,7 +9,7 @@ This is [GivTCP](https://github.com/britkat1980/giv_tcp) as a native integration
 | Inverter | Status |
 |---|---|
 | Hybrid Gen 1, Gen 2, Gen 3, Gen 4 | Supported |
-| HV Gen 3 hybrid | Supported (battery modules in the second and later stacks not yet) |
+| HV Gen 3 hybrid | Supported, with any number of battery stacks |
 | AC-coupled | Supported |
 | All-in-One | Supported |
 | All in One-HY, three-phase, EMS, Gateway, PV-only | Not yet: keep using the GivTCP add-on |
