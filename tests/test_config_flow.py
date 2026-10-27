@@ -60,6 +60,18 @@ async def test_user_flow_offers_found_dongles(hass: HomeAssistant, no_scan) -> N
     assert result["data_schema"].schema[host].config["options"] == ["192.168.2.202"]
 
 
+@pytest.mark.parametrize(("existing", "expected"), [([], "givtcp"), (["givtcp"], "givtcp2"),
+                                                     (["givtcp", "givtcp2", "house"], "givtcp3"),
+                                                     (["givtcp2"], "givtcp")])
+async def test_next_prefix(hass: HomeAssistant, existing, expected) -> None:
+    """Each inverter gets the next of GivTCP's default names, as battery stack and meter ids don't include the serial."""
+    for n, prefix in enumerate(existing):
+        MockConfigEntry(domain=DOMAIN, unique_id=f"SN{n}", data={CONF_ENTITY_PREFIX: prefix}).add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    prefix = next(key for key in result["data_schema"].schema if key == CONF_ENTITY_PREFIX)
+    assert prefix.default() == expected
+
+
 async def test_unsupported(hass: HomeAssistant) -> None:
     mock, host, port = await serve("ems")
     try:

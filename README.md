@@ -36,6 +36,8 @@ Entity IDs are the same as the add-on's: `sensor.givtcp_<serial>_soc`, `number.g
 2. Stop the GivTCP add-on, then remove its MQTT entities: **Settings → Devices & services → MQTT**, and delete the GivTCP devices. If they're still there when this integration is added, Home Assistant gives the new entities IDs ending `_2`.
 3. Add this integration, entering the same prefix.
 
+With more than one inverter, add each one, keeping each one's prefix from the add-on. The prefix offered is the next of GivTCP's defaults (`givtcp`, `givtcp2`, `givtcp3`...), so if you kept those you can accept it. Each inverter needs its own prefix, because battery stack and meter entity IDs (`sensor.givtcp_battery_stack_1_…`) don't include the inverter's serial.
+
 Energy statistics carry on under the same entity IDs.
 
 Two GivTCP clients polling one dongle can make it drop connections, so don't run the add-on and this integration against the same inverter.

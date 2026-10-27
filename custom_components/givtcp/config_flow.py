@@ -88,6 +88,19 @@ class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
         self._found: list[str] | None = None
         self._discovered: dict[str, Any] = {}
 
+    def _next_prefix(self) -> str:
+        """The first of GivTCP's default inverter names (GivTCP, GivTCP2, GivTCP3...) not already in use.
+
+        Battery stack and meter entity ids don't include the inverter's serial, so each inverter needs its own
+        prefix, as in GivTCP. Following its defaults keeps migrated entity ids the same.
+        """
+        used = {entry.data.get(CONF_ENTITY_PREFIX, DEFAULT_ENTITY_PREFIX)
+                for entry in self._async_current_entries(include_ignore=False)}
+        n = 1
+        while (prefix := DEFAULT_ENTITY_PREFIX + (str(n) if n > 1 else "")) in used:
+            n += 1
+        return prefix
+
     async def async_step_dhcp(self, discovery_info: DhcpServiceInfo) -> ConfigFlowResult:
         """A device with a GivEnergy dongle's WiFi module turned up on the network.
 
@@ -122,11 +135,11 @@ class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_discovery_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             data = {k: v for k, v in self._discovered.items() if k != "title"}
-            data[CONF_ENTITY_PREFIX] = slugify(user_input.get(CONF_ENTITY_PREFIX) or DEFAULT_ENTITY_PREFIX)
+            data[CONF_ENTITY_PREFIX] = slugify(user_input.get(CONF_ENTITY_PREFIX) or self._next_prefix())
             return self.async_create_entry(title=self._discovered["title"], data=data)
         return self.async_show_form(
             step_id="discovery_confirm",
-            data_schema=vol.Schema({vol.Optional(CONF_ENTITY_PREFIX, default=DEFAULT_ENTITY_PREFIX): str}),
+            data_schema=vol.Schema({vol.Optional(CONF_ENTITY_PREFIX, default=self._next_prefix()): str}),
             description_placeholders={"name": self._discovered["title"], "host": self._discovered[CONF_HOST]})
 
     async def _validate(self, user_input: dict[str, Any], errors: dict[str, str],
@@ -153,7 +166,7 @@ class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(serial)
                 self._abort_if_unique_id_configured(updates={CONF_HOST: user_input[CONF_HOST],
                                                              CONF_PORT: user_input[CONF_PORT]})
-                prefix = slugify(user_input.get(CONF_ENTITY_PREFIX) or DEFAULT_ENTITY_PREFIX)
+                prefix = slugify(user_input.get(CONF_ENTITY_PREFIX) or self._next_prefix())
                 return self.async_create_entry(
                     title=_title(model, serial),
                     data={CONF_HOST: user_input[CONF_HOST], CONF_PORT: user_input[CONF_PORT],
@@ -163,7 +176,7 @@ class GivTCPConfigFlow(ConfigFlow, domain=DOMAIN):
             configured = {entry.data.get(CONF_HOST) for entry in self._async_current_entries()}
             self._found = [h for h in await scan_for_dongles(self.hass) if h not in configured]
         schema = _user_schema(user_input or {}, self._found).extend({
-            vol.Optional(CONF_ENTITY_PREFIX, default=DEFAULT_ENTITY_PREFIX): str,
+            vol.Optional(CONF_ENTITY_PREFIX, default=self._next_prefix()): str,
         })
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors,
                                     description_placeholders=placeholders)
