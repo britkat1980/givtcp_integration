@@ -1,0 +1,72 @@
+force_charge:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: givtcp
+    minutes:
+      required: true
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+force_export:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: givtcp
+    minutes:
+      required: true
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+pause_charge:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: givtcp
+    minutes:
+      required: true
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+pause_discharge:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: givtcp
+    minutes:
+      required: true
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+cancel:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: givtcp
+    operation:
+      required: true
+      selector:
+        select:
+          translation_key: operation
+          options:
+            - force_charge
+            - force_export
+            - temp_pause_charge
+            - temp_pause_discharge

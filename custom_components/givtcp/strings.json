@@ -1,0 +1,112 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to your GivEnergy inverter",
+        "description": "Enter the address of the inverter's WiFi/LAN dongle. Give it a fixed IP address in your router so it doesn't change.",
+        "data": {
+          "host": "IP address",
+          "port": "Port",
+          "entity_prefix": "Entity ID prefix"
+        },
+        "data_description": {
+          "host": "The IP address of the inverter's dongle.",
+          "port": "The dongle's Modbus TCP port, normally 8899.",
+          "entity_prefix": "Entity IDs start with this, then the serial number, as GivTCP's do (eg. sensor.givtcp_sa1234g567_soc). Keep the prefix you used in GivTCP so your dashboards, automations and Predbat keep working."
+        }
+      },
+      "reconfigure": {
+        "title": "Change the inverter's address",
+        "data": {
+          "host": "IP address",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Couldn't connect to the inverter. Check the IP address, that the dongle is on your network, and that nothing else is blocking port 8899.",
+      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase hybrids, AC-coupled and All-in-One inverters are; keep using the GivTCP add-on for the others for now.",
+      "unknown": "Unexpected error, see the logs."
+    },
+    "abort": {
+      "already_configured": "This inverter is already set up.",
+      "reconfigure_successful": "The inverter's address has been updated.",
+      "wrong_inverter": "That address is a different inverter. Add it as a new one instead."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling",
+        "data": {
+          "scan_interval": "Seconds between reads",
+          "full_refresh_interval": "Seconds between settings reads"
+        },
+        "data_description": {
+          "scan_interval": "How often to read the live values (power, energy, battery).",
+          "full_refresh_interval": "How often to read the inverter's settings (mode, slots, rates). They're also read straight after every change."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "no_inverter": {
+      "message": "No GivTCP inverter is set up and running."
+    },
+    "which_inverter": {
+      "message": "More than one GivTCP inverter is set up: choose which one."
+    }
+  },
+  "selector": {
+    "operation": {
+      "options": {
+        "force_charge": "Force charge",
+        "force_export": "Force export",
+        "temp_pause_charge": "Pause charge",
+        "temp_pause_discharge": "Pause discharge"
+      }
+    }
+  },
+  "services": {
+    "force_charge": {
+      "name": "Force charge",
+      "description": "Charge the battery from the grid at full rate to 100% for a while, through charge slot 1, then put the settings back.",
+      "fields": {
+        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
+        "minutes": {"name": "Minutes", "description": "How long for."}
+      }
+    },
+    "force_export": {
+      "name": "Force export",
+      "description": "Discharge the battery to the grid at full power for a while, through discharge slot 1, then put the settings back.",
+      "fields": {
+        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
+        "minutes": {"name": "Minutes", "description": "How long for."}
+      }
+    },
+    "pause_charge": {
+      "name": "Pause charge",
+      "description": "Stop the battery charging for a while, by setting the charge rate to 0, then put the rate back.",
+      "fields": {
+        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
+        "minutes": {"name": "Minutes", "description": "How long for."}
+      }
+    },
+    "pause_discharge": {
+      "name": "Pause discharge",
+      "description": "Stop the battery discharging for a while, by setting the discharge rate to 0, then put the rate back.",
+      "fields": {
+        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
+        "minutes": {"name": "Minutes", "description": "How long for."}
+      }
+    },
+    "cancel": {
+      "name": "Cancel",
+      "description": "End a force charge, force export or pause now, and put the settings back.",
+      "fields": {
+        "config_entry_id": {"name": "Inverter", "description": "Which inverter, if you have more than one."},
+        "operation": {"name": "Operation", "description": "Which one to end."}
+      }
+    }
+  }
+}

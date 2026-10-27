@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set the version in the manifest from the release tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          jq --arg v "$version" '.version = $v' custom_components/givtcp/manifest.json > manifest.tmp
+          mv manifest.tmp custom_components/givtcp/manifest.json
+      - name: Zip the integration
+        run: cd custom_components/givtcp && zip -r ../../givtcp.zip . -x "__pycache__/*"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: givtcp.zip
