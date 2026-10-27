@@ -45,8 +45,8 @@ CONTROLS = [
                   device_class=NumberDeviceClass.POWER,
                   write=lambda c, v: commands.discharge_rate(c.data, v)),
     # The AC limits reject 0%
-    NumberControl(key="Battery_Charge_Rate_AC", min=1, write=lambda c, v: commands.charge_rate_ac(v)),
-    NumberControl(key="Battery_Discharge_Rate_AC", min=1, write=lambda c, v: commands.discharge_rate_ac(v)),
+    NumberControl(key="Battery_Charge_Rate_AC", min=1, write=lambda c, v: commands.charge_rate_ac(c.data, v)),
+    NumberControl(key="Battery_Discharge_Rate_AC", min=1, write=lambda c, v: commands.discharge_rate_ac(c.data, v)),
     _soc("Target_SOC", lambda c, v: commands.target_soc(c.inverter, v)),
     _soc("Battery_Power_Reserve", lambda c, v: commands.battery_reserve(c.inverter, v)),
     _soc("Battery_Power_Cutoff", lambda c, v: commands.battery_cutoff(c.inverter, v)),

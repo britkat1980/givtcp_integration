@@ -1,7 +1,7 @@
 """Builds the register writes for each GivTCP control.
 
-A port of GivTCP's write.py for single-phase inverters. Each function returns the requests to send; the
-coordinator sends them. Nothing here touches Home Assistant.
+A port of GivTCP's write.py. Each function returns the requests to send; the coordinator sends them. Nothing here
+touches Home Assistant.
 """
 
 from __future__ import annotations
@@ -11,12 +11,13 @@ from typing import Any
 
 from givenergy_modbus.client import commands as gecommands
 from givenergy_modbus.model.inverter import Model, SinglePhaseInverter
+from givenergy_modbus.model.inverter_threephase import ThreePhaseInverter
 from givenergy_modbus.model.slot_map import EXTENDED_SLOTS
 from givenergy_modbus.pdu import TransparentRequest, WriteHoldingRegisterRequest
 
 from .const import BATTERY_PAUSE_MODES, MAX_BATTERY_LIMIT_PERCENT, MIN_SOC, MODES
 from .data import GivData, battery_limit_percent
-from .modbus import EXTENDED_CHARGE_SLOT_2, SLOT_TARGET_BASE
+from .modbus import EXTENDED_CHARGE_SLOT_2, SLOT_TARGET_BASE, THREE_PHASE_AC_LIMIT, is_three_phase
 
 Requests = list[TransparentRequest]
 
@@ -58,43 +59,57 @@ def _limit_percent(data: GivData, watts: float) -> int:
     return battery_limit_percent(watts, capacity, data.model.batmaxrate)
 
 
-def _gateway(data: GivData) -> bool:
-    return data.model.model == Model.GATEWAY
+def three_phase(inv) -> bool:
+    return isinstance(inv, ThreePhaseInverter)
+
+
+def _rates_are_ac_limits(data: GivData) -> bool:
+    # The Gateway's and three-phase's rates are their AC limits: a percentage of the battery rate
+    return data.model.model == Model.GATEWAY or is_three_phase(data.model.model)
+
+
+def _ac_limit(data: GivData, kind: str, percent: int) -> Requests:
+    """The AC charge/discharge limit: HR1110/1108 on three-phase, HR313/314 elsewhere."""
+    if is_three_phase(data.model.model):
+        percent = int(percent)
+        if not 1 <= percent <= 100:     # as HR313/314, the inverter rejects 0
+            raise CommandError(f"The rate ({percent}%) must be 1-100%")
+        return [WriteHoldingRegisterRequest(THREE_PHASE_AC_LIMIT[kind], percent)]
+    return getattr(gecommands, f"set_battery_{kind}_limit_ac")(int(percent))
 
 
 def _ac_limit_percent(data: GivData, watts: float) -> int:
-    # The Gateway's rate is its AC limit, a percentage of the All-in-Ones' battery rate. Above it means full rate,
-    # and the register rejects 0%, so the closest to a pause is 1%
+    # Above the battery rate means full rate, and the register rejects 0%, so the closest to a pause is 1%
     if not data.model.batmaxrate:
-        raise CommandError("the All-in-Ones' battery rate isn't known, so the rate can't be set")
+        raise CommandError("the battery rate isn't known, so the rate can't be set")
     return int(max(1, min(100, round(watts / data.model.batmaxrate * 100))))
 
 
 def charge_rate(data: GivData, watts: float) -> Requests:
-    """The battery charge rate in W, as HR111's percentage of battery capacity (at most 50), or the Gateway's AC limit."""
-    if _gateway(data):
-        return gecommands.set_battery_charge_limit_ac(_ac_limit_percent(data, watts))
+    """The battery charge rate in W: HR111's percentage of battery capacity (at most 50), or the AC limit."""
+    if _rates_are_ac_limits(data):
+        return _ac_limit(data, "charge", _ac_limit_percent(data, watts))
     return gecommands.set_battery_charge_limit(_limit_percent(data, watts))
 
 
 def discharge_rate(data: GivData, watts: float) -> Requests:
-    if _gateway(data):
-        return gecommands.set_battery_discharge_limit_ac(_ac_limit_percent(data, watts))
+    if _rates_are_ac_limits(data):
+        return _ac_limit(data, "discharge", _ac_limit_percent(data, watts))
     return gecommands.set_battery_discharge_limit(_limit_percent(data, watts))
 
 
 def _full_rate(data: GivData, kind: str) -> Requests:
-    if _gateway(data):
-        return getattr(gecommands, f"set_battery_{kind}_limit_ac")(100)
+    if _rates_are_ac_limits(data):
+        return _ac_limit(data, kind, 100)
     return getattr(gecommands, f"set_battery_{kind}_limit")(MAX_BATTERY_LIMIT_PERCENT)
 
 
-def charge_rate_ac(percent: int) -> Requests:
-    return gecommands.set_battery_charge_limit_ac(int(percent))
+def charge_rate_ac(data: GivData, percent: int) -> Requests:
+    return _ac_limit(data, "charge", percent)
 
 
-def discharge_rate_ac(percent: int) -> Requests:
-    return gecommands.set_battery_discharge_limit_ac(int(percent))
+def discharge_rate_ac(data: GivData, percent: int) -> Requests:
+    return _ac_limit(data, "discharge", percent)
 
 
 # --- targets and reserves ----------------------------------------------------------------------------------
@@ -125,17 +140,39 @@ def battery_reserve(inv: SinglePhaseInverter, percent: int) -> Requests:
 
 
 def battery_cutoff(inv: SinglePhaseInverter, percent: int) -> Requests:
+    if three_phase(inv):        # its battery reserve SOC, HR1078
+        return inv.set_battery_reserve_soc(max(int(percent), MIN_SOC))
     return inv.set_battery_power_reserve(max(int(percent), MIN_SOC))
 
 
 # --- switches ----------------------------------------------------------------------------------------------
 
 def charge_schedule(inv: SinglePhaseInverter, enable: bool) -> Requests:
+    if three_phase(inv):
+        # Both the enables it's read from: force charge (HR1123) and AC charge (HR1112). The library's
+        # set_enable_charge() only writes HR1112, which leaves it off while force charge is
+        return inv.set_force_charge(enable) + inv.set_ac_charge(enable)
     return inv.set_enable_charge(enable)
 
 
 def discharge_schedule(inv: SinglePhaseInverter, enable: bool) -> Requests:
+    if three_phase(inv):
+        # The force discharge enable, HR1122, which it's read from. The library's set_enable_discharge() writes the
+        # single-phase HR59
+        return inv.set_force_discharge(enable)
     return inv.set_enable_discharge(enable)
+
+
+def force_charge_enable(inv, enable: bool) -> Requests:
+    return inv.set_force_charge(enable)
+
+
+def force_discharge_enable(inv, enable: bool) -> Requests:
+    return inv.set_force_discharge(enable)
+
+
+def ac_charge_enable(inv, enable: bool) -> Requests:
+    return inv.set_ac_charge(enable)
 
 
 def eco_mode(inv: SinglePhaseInverter, enable: bool) -> Requests:
@@ -156,13 +193,13 @@ def slot_registers(inv: SinglePhaseInverter, data: GivData, kind: str, slot: int
     """The (start, end) registers of a charge or discharge slot."""
     if not 1 <= slot <= data.slot_count:
         raise CommandError(f"This inverter has {data.slot_count} {kind} slots, not {slot}")
-    if kind == "charge" and slot == 2 and data.slot_count == 10:
-        return EXTENDED_CHARGE_SLOT_2       # 10-slot firmware keeps charge slot 2 at HR243/244, not HR31/32
     # The library gives the Gateway the 2-slot layout, though it has 10 slots
-    layout = EXTENDED_SLOTS if data.slot_count == 10 else inv.slot_map
+    layout = inv.slot_map if len(inv.slot_map.charge_slots) >= data.slot_count else EXTENDED_SLOTS
     slots = layout.charge_slots if kind == "charge" else layout.discharge_slots
     if slot > len(slots):
         raise CommandError(f"This inverter has {len(slots)} {kind} slots, not {slot}")
+    if kind == "charge" and slot == 2 and data.slot_count == 10 and slots[1] == (31, 32):
+        return EXTENDED_CHARGE_SLOT_2       # 10-slot single-phase firmware keeps charge slot 2 at HR243/244
     return slots[slot - 1]
 
 
@@ -209,18 +246,21 @@ def mode(inv: SinglePhaseInverter, new_mode: str, saved_reserve: int | None = No
     """Port of GivTCP's setBatteryMode."""
     if new_mode not in MODES:
         raise CommandError(f"{new_mode} isn't a mode")
+    # Dynamic: match demand, a 4% reserve and discharge off. As set_mode_dynamic(), but with three-phase's own
+    # discharge enable, which the library's doesn't use
+    dynamic = (inv.set_discharge_mode_to_match_demand() + inv.set_battery_soc_reserve(MIN_SOC)
+               + discharge_schedule(inv, False))
     if new_mode == "Eco":
-        reqs = inv.set_mode_dynamic()   # also sets the reserve to 4%: put back the one saved before a pause
-        if saved_reserve is not None:
-            reqs = reqs + inv.set_battery_soc_reserve(max(saved_reserve, MIN_SOC))
-        return last_write_per_register(reqs)
+        if saved_reserve is not None:   # put back the reserve from before a pause
+            dynamic += inv.set_battery_soc_reserve(max(saved_reserve, MIN_SOC))
+        return last_write_per_register(dynamic)
     if new_mode == "Eco (Paused)":
-        return last_write_per_register(inv.set_mode_dynamic() + inv.set_battery_soc_reserve(100))
+        return last_write_per_register(dynamic + inv.set_battery_soc_reserve(100))
     if new_mode == "Timed Demand":
-        return inv.set_discharge_mode_to_match_demand() + inv.set_enable_discharge(True)
+        return inv.set_discharge_mode_to_match_demand() + discharge_schedule(inv, True)
     if new_mode == "Timed Export":
-        return inv.set_discharge_mode_max_power() + inv.set_enable_discharge(True)
-    return inv.set_discharge_mode_max_power() + inv.set_enable_discharge(False)   # Export (Paused)
+        return inv.set_discharge_mode_max_power() + discharge_schedule(inv, True)
+    return inv.set_discharge_mode_max_power() + discharge_schedule(inv, False)   # Export (Paused)
 
 
 # --- timed operations --------------------------------------------------------------------------------------
@@ -242,17 +282,27 @@ def force_charge(inv: SinglePhaseInverter, data: GivData, minutes: int, now: dat
         "slot1_target_soc": c.get("Charge_Target_SOC_1"),
         "charge_schedule": c.get("Enable_Charge_Schedule"), "pause_mode": c.get("Battery_pause_mode"),
     }
+    if three_phase(inv):
+        # Its charge schedule is these two enables, put back as they were
+        del revert["charge_schedule"]
+        revert.update(force_charge=c.get("Force_Charge_Enable"), ac_charge=c.get("Force_AC_Charge_Enable"))
     revert = {k: v for k, v in revert.items() if v is not None}
     start, end = _slot_now(now, minutes)
     reqs = target_soc(inv, 100)
     if "slot1_target_soc" in revert:
         reqs += slot_target("charge", 1, 100)
     reqs += slot(inv, data, "charge", 1, start, end)
-    reqs += inv.set_enable_charge(True)
+    reqs += charge_schedule(inv, True)
     reqs += _full_rate(data, "charge")
     if "pause_mode" in revert:
         reqs += pause_mode("Disabled")
     return last_write_per_register(reqs), revert
+
+
+def _revert_flags(inv, revert: dict, *keys: str) -> Requests:
+    # Three-phase's force charge, AC charge and force discharge enables, as they were (only three-phase has them)
+    writers = {"force_charge": "set_force_charge", "ac_charge": "set_ac_charge", "force_discharge": "set_force_discharge"}
+    return [r for key in keys if key in revert for r in getattr(inv, writers[key])(revert[key] == "enable")]
 
 
 def force_charge_revert(inv: SinglePhaseInverter, data: GivData, revert: dict) -> Requests:
@@ -260,7 +310,8 @@ def force_charge_revert(inv: SinglePhaseInverter, data: GivData, revert: dict) -
     if "charge_rate" in revert:
         reqs += charge_rate(data, revert["charge_rate"])
     if "charge_schedule" in revert:
-        reqs += inv.set_enable_charge(revert["charge_schedule"] == "enable")
+        reqs += charge_schedule(inv, revert["charge_schedule"] == "enable")
+    reqs += _revert_flags(inv, revert, "force_charge", "ac_charge")
     if "start" in revert and "end" in revert:
         reqs += slot(inv, data, "charge", 1, revert["start"], revert["end"])
     if "target_soc" in revert:
@@ -283,12 +334,16 @@ def force_export(inv: SinglePhaseInverter, data: GivData, minutes: int, now: dat
     }
     if revert["mode"] == "Unknown":
         revert["mode"] = None
+    if three_phase(inv):
+        revert["force_charge"] = c.get("Force_Charge_Enable")
     revert = {k: v for k, v in revert.items() if v is not None}
     start, end = _slot_now(now, minutes)
     reqs = inv.set_battery_soc_reserve(MIN_SOC)
     reqs += _full_rate(data, "discharge")
     # Timed Export on slot 1 only: set_mode_storage would also clear discharge slot 2, which isn't reverted
-    reqs += inv.set_discharge_mode_max_power() + inv.set_enable_discharge(True)
+    reqs += inv.set_discharge_mode_max_power() + discharge_schedule(inv, True)
+    if three_phase(inv):
+        reqs += inv.set_force_charge(False)     # or it would charge rather than export
     reqs += slot(inv, data, "discharge", 1, start, end)
     if "pause_mode" in revert:
         reqs += pause_mode("Disabled")
@@ -303,7 +358,8 @@ def force_export_revert(inv: SinglePhaseInverter, data: GivData, revert: dict) -
     if "start" in revert and "end" in revert:
         reqs += slot(inv, data, "discharge", 1, revert["start"], revert["end"])
     if "discharge_schedule" in revert:
-        reqs += inv.set_enable_discharge(revert["discharge_schedule"] == "enable")
+        reqs += discharge_schedule(inv, revert["discharge_schedule"] == "enable")
+    reqs += _revert_flags(inv, revert, "force_charge")
     if "discharge_rate" in revert:
         reqs += discharge_rate(data, revert["discharge_rate"])
     if "pause_mode" in revert:

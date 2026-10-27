@@ -86,8 +86,6 @@ def unsupported_reason(plant: Plant) -> str | None:
         return "not_detected"
     if caps.is_ems:
         return "ems"
-    if caps.is_three_phase:     # not the All in One-HY, which the client shows the library as single-phase
-        return "three_phase"
     device_type = plant.register_caches.get(caps.inverter_address, {}).get(_HR0)
     if device_type is not None and hex(device_type)[2:4] == "23":
         return "pv_inverter"
@@ -166,6 +164,8 @@ def inverter_model(plant: Plant) -> InverterModel:
 def slot_count(plant: Plant) -> int:
     """How many charge/discharge slots this inverter has."""
     model = _resolved_model(plant)
+    if plant.capabilities.is_three_phase:
+        return len(plant.inverter.slot_map.charge_slots)
     if model in TEN_SLOT_MODELS:
         return 10
     if model == Model.HYBRID_GEN3:
@@ -304,21 +304,35 @@ def _mode(battery_power_mode, enable_discharge, reserve) -> str:
 
 
 def get_controls(plant: Plant, m: InverterModel, previous: GivData | None) -> dict[str, Any]:
-    """Port of GivTCP's getControls for single-phase inverters."""
+    """Port of GivTCP's getControls."""
     inv = plant.inverter
+    three_phase = plant.capabilities.is_three_phase
     controls: dict[str, Any] = {}
-    controls["Enable_Charge_Schedule"] = _flag(inv.enable_charge, previous, "Enable_Charge_Schedule")
-    controls["Enable_Discharge_Schedule"] = _flag(inv.enable_discharge, previous, "Enable_Discharge_Schedule")
+    if three_phase:
+        # Charging is the force charge and AC charge enables (HR1123, HR1112); discharge is the force discharge
+        # enable (HR1122), not the single-phase HR59
+        charging = inv.force_charge_enable and inv.ac_charge_enable \
+            if None not in (inv.force_charge_enable, inv.ac_charge_enable) else None
+        enable_discharge = inv.force_discharge_enable
+        controls["Enable_Charge_Schedule"] = _flag(charging, previous, "Enable_Charge_Schedule")
+        for key, value in (("Force_Charge_Enable", inv.force_charge_enable),
+                           ("Force_Discharge_Enable", inv.force_discharge_enable),
+                           ("Force_AC_Charge_Enable", inv.ac_charge_enable)):
+            controls[key] = _flag(value, previous, key)
+    else:
+        enable_discharge = inv.enable_discharge
+        controls["Enable_Charge_Schedule"] = _flag(inv.enable_charge, previous, "Enable_Charge_Schedule")
+        controls["Eco_Mode"] = _flag(inv.battery_power_mode, previous, "Eco_Mode")
+    controls["Enable_Discharge_Schedule"] = _flag(enable_discharge, previous, "Enable_Discharge_Schedule")
     controls["Enable_Charge_Target"] = _flag(inv.enable_charge_target, previous, "Enable_Charge_Target")
-    controls["Eco_Mode"] = _flag(inv.battery_power_mode, previous, "Eco_Mode")
     controls["Real_Time_Control"] = _flag(inv.enable_rtc, previous, "Real_Time_Control")
 
     # HR111/112 can be unread if the HR(60-119) block failed: fall back to the previous values. On the Gateway
-    # the rates are the AC limits (HR313/314), a percentage of the All-in-Ones' battery rate
-    gateway = m.model == Model.GATEWAY
-    for key, limit in (("Battery_Discharge_Rate", inv.battery_discharge_limit_ac if gateway else inv.battery_discharge_limit),
-                       ("Battery_Charge_Rate", inv.battery_charge_limit_ac if gateway else inv.battery_charge_limit)):
-        if gateway:
+    # and three-phase the rates are the AC limits (HR313/314, HR1110/1108), a percentage of the battery rate
+    ac_limits = m.model == Model.GATEWAY or three_phase
+    for key, limit in (("Battery_Discharge_Rate", inv.battery_discharge_limit_ac if ac_limits else inv.battery_discharge_limit),
+                       ("Battery_Charge_Rate", inv.battery_charge_limit_ac if ac_limits else inv.battery_charge_limit)):
+        if ac_limits:
             rate = int(m.batmaxrate * limit / 100) if limit is not None and m.batmaxrate else None
         else:
             rate = battery_rate_watts(limit, m)
@@ -331,8 +345,9 @@ def get_controls(plant: Plant, m: InverterModel, previous: GivData | None) -> di
     if inv.battery_charge_limit_ac:
         controls["Battery_Charge_Rate_AC"] = int(inv.battery_charge_limit_ac)
 
-    controls["Mode"] = _mode(inv.battery_power_mode, inv.enable_discharge, inv.battery_soc_reserve)
-    controls["Battery_Power_Cutoff"] = inv.battery_discharge_min_power_reserve
+    controls["Mode"] = _mode(inv.battery_power_mode, enable_discharge, inv.battery_soc_reserve)
+    # Three-phase's cutoff is its battery reserve SOC, HR1078; its reserve (HR1109) is what the modes set
+    controls["Battery_Power_Cutoff"] = inv.battery_reserve_soc if three_phase else inv.battery_discharge_min_power_reserve
     controls["Battery_Power_Reserve"] = inv.battery_soc_reserve
     controls["Target_SOC"] = inv.charge_target_soc
     controls["Active_Power_Rate"] = inv.active_power_rate
@@ -356,8 +371,9 @@ def get_timeslots(plant: Plant, previous: GivData | None) -> tuple[dict[str, str
     for kind in ("Charge", "Discharge"):
         for n in range(1, count + 1):
             attr = f"{kind.lower()}_slot_{n}"
-            if kind == "Charge" and n == 2 and count == 10:
-                # 10-slot firmware keeps charge slot 2 at HR243/244, not HR31/32
+            if kind == "Charge" and n == 2 and count == 10 and hasattr(inv, "charge_slot_2_x"):
+                # 10-slot single-phase firmware keeps charge slot 2 at HR243/244, not HR31/32 (three-phase has
+                # its own, HR1115/1116)
                 attr = "charge_slot_2_x"
             slot = getattr(inv, attr, None)
             for edge in ("start", "end"):
@@ -690,10 +706,141 @@ def build_gateway(plant: Plant, previous: GivData | None, timezone: tzinfo, now:
     return data
 
 
+# Three-phase IR1075 and IR1120, which the library gives as numbers
+TPH_SYSTEM_MODE = {0: "Offline", 1: "Grid_tied"}
+TPH_BATTERY_PRIORITY = {0: "Load", 1: "Battery", 2: "Grid"}
+# Battery power on three-phase: 25A x 80V a module
+TPH_MODULE_RATE = 25 * 80
+
+
+def build_three_phase(plant: Plant, previous: GivData | None, timezone: tzinfo,
+                      now: datetime | None = None) -> GivData:
+    """Port of GivTCP's processThreePhaseInfo."""
+    inv = plant.inverter
+    m = InverterModel(model=_resolved_model(plant), invmaxrate=inv.inverter_max_power,
+                      batmaxrate=TPH_MODULE_RATE * battery_count(plant) or None)
+    data = GivData(serial=plant.inverter_serial, model=m, slot_count=slot_count(plant), pause_supported=False)
+    out = data.inverter
+    now = now or datetime.now(timezone)
+    inv_time = _inverter_time(inv.system_time, previous, timezone, now)
+    out["Invertor_Time"] = inv_time
+
+    get_batteries(plant, previous, data)
+    # The battery capacity is the stacks' (the library has none for three-phase)
+    capacity = sum(s.get("Stack_Design_Capacity") or 0 for s in data.stacks.values())
+    m.batterycapacity = round(capacity, 2) or None
+
+    out.update({
+        "Inverter_Out_Energy_Today_kWh": inv.e_inverter_out_today,
+        "PV1_Energy_Today_kWh": inv.e_pv1_today,
+        "PV2_Energy_Today_kWh": inv.e_pv2_today,
+        "PV_Energy_Today_kWh": inv.e_pv_today,
+        "AC_Charge_Energy_Today_kWh": inv.e_ac_charge_today,
+        "Import_Energy_Today_kWh": inv.e_import_today,
+        "Export_Energy_Today_kWh": inv.e_export_today,
+        "Battery_Discharge_Energy_Today_kWh": inv.e_battery_discharge_today,
+        "Battery_Charge_Energy_Today_kWh": inv.e_battery_charge_today,
+        "Load_Energy_Today_kWh": inv.e_load_today,
+        "Export2_Energy_Today_kWh": inv.e_export2_today,
+        "Inverter_Out_Energy_Total_kWh": inv.e_inverter_out_total,
+        "PV1_Energy_Total_kWh": inv.e_pv1_total,
+        "PV2_Energy_Total_kWh": inv.e_pv2_total,
+        "AC_Charge_Energy_Total_kWh": inv.e_ac_charge_total,
+        "Import_Energy_Total_kWh": inv.e_import_total,
+        "Export_Energy_Total_kWh": inv.e_export_total,
+        "Battery_Discharge_Energy_Total_kWh": inv.e_battery_discharge_total,
+        "Battery_Charge_Energy_Total_kWh": inv.e_battery_charge_total,
+        "Load_Energy_Total_kWh": inv.e_load_total,
+        "Export2_Energy_Total_kWh": inv.e_export2_total,
+        "PV_Energy_Total_kWh": inv.e_pv_total,
+
+        "Export_Power": inv.p_export,
+        "Meter2_Power": inv.p_meter2,
+        "EPS_Phase1_Power": inv.p_eps_ac1,
+        "EPS_Phase2_Power": inv.p_eps_ac2,
+        "EPS_Phase3_Power": inv.p_eps_ac3,
+        "Battery_Charge_Power": inv.p_battery_charge,
+        "Battery_Discharge_Power": inv.p_battery_discharge,
+        "Inverter_Power_Out": inv.p_grid_out_ph1,
+        "AC_Charge_Power": inv.p_inverter_ac_charge,
+        "Grid_Apparent_Power": inv.p_grid_apparent,
+        "Meter_Import_Power": inv.p_meter_import,
+        "Meter_Export_Power": inv.p_meter_export,
+        "Load_Phase1_Power": inv.p_meter_active_ac1,
+        "Load_Phase2_Power": inv.p_meter_active_ac2,
+        "Load_Phase3_Power": inv.p_meter_active_ac3,
+        "Load_Power": inv.p_load_all,
+        "Export_Phase1_Power": inv.p_inverter_active_ac1,
+        "Export_Phase2_Power": inv.p_inverter_active_ac2,
+        "Export_Phase3_Power": inv.p_inverter_active_ac3,
+        "PV_Voltage_String_1": inv.v_pv1,
+        "PV_Voltage_String_2": inv.v_pv2,
+        "PV_Current_String_1": inv.i_pv1,
+        "PV_Current_String_2": inv.i_pv2,
+        "PV_Power_String_1": inv.p_pv1,
+        "PV_Power_String_2": inv.p_pv2,
+        "PV_Power": _sum_present(inv.p_pv1, inv.p_pv2),
+        "PV_Current": _sum_present(inv.i_pv1, inv.i_pv2),
+        "Grid_Phase1_Voltage": inv.v_ac1,
+        "Grid_Phase2_Voltage": inv.v_ac2,
+        "Grid_Phase3_Voltage": inv.v_ac3,
+        "Output_Phase1_Voltage": inv.v_out_ac1,
+        "Output_Phase2_Voltage": inv.v_out_ac2,
+        "Output_Phase3_Voltage": inv.v_out_ac3,
+        "Grid_Phase1_Current": inv.i_ac1,
+        "Grid_Phase2_Current": inv.i_ac2,
+        "Grid_Phase3_Current": inv.i_ac3,
+        "Grid_Frequency": inv.f_ac1,
+        "SOC": inv.battery_soc,
+        "Battery_Current": inv.i_battery,
+        "PCS_Voltage": inv.v_battery_pcs,
+        "BMS_Voltage": inv.v_battery_bms,
+        "EPS_Nominal_Frequency": inv.f_nominal_eps,
+
+        "status": _enum_text(inv.status),
+        "System_Mode": TPH_SYSTEM_MODE.get(inv.system_mode, str(inv.system_mode)) if inv.system_mode is not None else None,
+        "Start_Delay_Time": inv.start_delay_time,
+        "Power_Factor": inv.power_factor,
+        "Battery_Type": _enum_text(inv.battery_type),
+        "Invertor_Type": "Gen 3 - " + m.model.name.capitalize() if m.model is not None else None,
+        "Invertor_Max_Bat_Rate": m.batmaxrate,
+        "Invertor_Max_Inv_Rate": m.invmaxrate,
+        "Battery_Priority": TPH_BATTERY_PRIORITY.get(inv.battery_priority, str(inv.battery_priority))
+        if inv.battery_priority is not None else None,
+        "Battery_Capacity_kWh": m.batterycapacity,
+        "Inverter_Temperature": inv.t_inverter,
+        "Boost_Temperature": inv.t_boost,
+        "Buck_Boost_Temperature": inv.t_buck_boost,
+        "DC_Status": _enum_text(inv.dc_status),
+        "Invertor_Serial_Number": data.serial,
+        "Invertor_Software": inv.tph_software_version,
+        "Invertor_Firmware": inv.tph_firmware_version,
+        "Battery_Calibration_Status": _enum_text(inv.battery_calibration_stage),
+    })
+    # The stacks' remaining energy, added up (GivTCP averages it, which understates more than one stack)
+    stored = [s["Stack_SOC_kWh"] for s in data.stacks.values() if s.get("Stack_SOC_kWh") is not None]
+    if stored:
+        out["SOC_kWh"] = round(sum(stored), 2)
+
+    data.controls = get_controls(plant, m, previous)
+    data.timeslots, targets = get_timeslots(plant, previous)
+    data.controls.update(targets)
+    get_meters(plant, data)
+    out.update(power_flows(out["PV_Power"], inv.p_load_all, inv.p_meter_import, inv.p_meter_export,
+                           inv.p_battery_charge, inv.p_battery_discharge))
+
+    _guard_energy(out, previous, inv_time)
+    data.inverter = {k: v for k, v in out.items() if v is not None}
+    return data
+
+
 def build(plant: Plant, previous: GivData | None, timezone: tzinfo, now: datetime | None = None) -> GivData:
-    """Port of GivTCP's processInverterInfo for single-phase inverters, or processGatewayInfo for a Gateway."""
+    """Port of GivTCP's processInverterInfo for single-phase inverters, processGatewayInfo for a Gateway, or
+    processThreePhaseInfo for three-phase."""
     if plant.capabilities.is_gateway:
         return build_gateway(plant, previous, timezone, now)
+    if plant.capabilities.is_three_phase:
+        return build_three_phase(plant, previous, timezone, now)
     inv = plant.inverter
     m = inverter_model(plant)
     data = GivData(serial=plant.inverter_serial, model=m, slot_count=slot_count(plant),

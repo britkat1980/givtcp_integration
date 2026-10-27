@@ -21,6 +21,10 @@ CONTROLS: dict[str, Callable[[GivTCPCoordinator, bool], Requests]] = {
     "Enable_Charge_Target": lambda c, on: commands.enable_charge_target(c.inverter, on),
     "Eco_Mode": lambda c, on: commands.eco_mode(c.inverter, on),
     "Real_Time_Control": lambda c, on: commands.real_time_control(c.inverter, on),
+    # Three-phase
+    "Force_Charge_Enable": lambda c, on: commands.force_charge_enable(c.inverter, on),
+    "Force_Discharge_Enable": lambda c, on: commands.force_discharge_enable(c.inverter, on),
+    "Force_AC_Charge_Enable": lambda c, on: commands.ac_charge_enable(c.inverter, on),
 }
 
 

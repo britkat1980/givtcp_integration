@@ -14,7 +14,8 @@ This is [GivTCP](https://github.com/britkat1980/giv_tcp) as a native integration
 | All-in-One | Supported |
 | All in One-HY | Supported |
 | Gateway | Supported, with up to 3 All-in-Ones. Its controls only appear in parallel mode (more than one All-in-One online); otherwise, control each All-in-One directly |
-| Three-phase, EMS, PV-only | Not yet: keep using the GivTCP add-on |
+| Three-phase hybrid and AC-coupled | Supported |
+| EMS, PV-only | Not yet: keep using the GivTCP add-on |
 
 If your inverter isn't supported yet, setup tells you so and doesn't add it.
 

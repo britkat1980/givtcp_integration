@@ -14,6 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import (
     PERCENTAGE,
     EntityCategory,
+    UnitOfApparentPower,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
@@ -39,6 +40,7 @@ DIAGNOSTIC_TEXT = {
     "Stack_Discharge_MOS_State", "Meter_Status", "Battery_Cells", "Gateway_Software_Version", "Gateway_State",
     "Gateway_Mode", "Parallel_Total_AIO_Number", "Parallel_Total_AIO_Online_Number",
     *(f"AIO_{n}_Serial_Number" for n in (1, 2, 3)),
+    "status", "System_Mode", "Battery_Priority", "DC_Status", "Invertor_Software", "Start_Delay_Time",
 }
 TIMESTAMPS = {"Invertor_Time", "Last_Updated_Time", "Charge_Completion_Time", "Discharge_Completion_Time"}
 SOC_KEYS = {"SOC", "Battery_SOC", "Stack_SOC_High", "Stack_SOC_Low", "Stack_SOC_Difference"}
@@ -69,6 +71,11 @@ def describe(key: str) -> SensorEntityDescription:
         return SensorEntityDescription(key=key, device_class=SensorDeviceClass.ENERGY_STORAGE,
                                        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, state_class=M,
                                        entity_category=EntityCategory.DIAGNOSTIC if "Capacity" in key else None)
+    if key == "Grid_Apparent_Power":
+        return SensorEntityDescription(key=key, device_class=SensorDeviceClass.APPARENT_POWER,
+                                       native_unit_of_measurement=UnitOfApparentPower.VOLT_AMPERE, state_class=M)
+    if key == "Power_Factor":
+        return SensorEntityDescription(key=key, state_class=M)
     if key.endswith("Power") or "_to_" in key:
         return SensorEntityDescription(key=key, device_class=SensorDeviceClass.POWER,
                                        native_unit_of_measurement=UnitOfPower.WATT, state_class=M)

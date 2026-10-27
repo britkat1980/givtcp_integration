@@ -35,7 +35,7 @@
     },
     "error": {
       "cannot_connect": "Couldn't connect to the inverter. Check the IP address, that the dongle is on your network, and that nothing else is blocking port 8899.",
-      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase inverters, the All in One-HY and the Gateway are; keep using the GivTCP add-on for three-phase inverters, the EMS and PV-only inverters for now.",
+      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase and three-phase inverters, the All in One-HY and the Gateway are; keep using the GivTCP add-on for the EMS and PV-only inverters for now.",
       "unknown": "Unexpected error, see the logs."
     },
     "abort": {
@@ -43,7 +43,7 @@
       "reconfigure_successful": "The inverter's address has been updated.",
       "wrong_inverter": "That address is a different inverter. Add it as a new one instead.",
       "not_givenergy": "That device isn't a GivEnergy inverter.",
-      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase inverters, the All in One-HY and the Gateway are; keep using the GivTCP add-on for three-phase inverters, the EMS and PV-only inverters for now."
+      "unsupported": "This inverter isn't supported yet ({reason}). Single-phase and three-phase inverters, the All in One-HY and the Gateway are; keep using the GivTCP add-on for the EMS and PV-only inverters for now."
     },
     "flow_title": "{name}"
   },

@@ -16,6 +16,9 @@ Home Assistant may use the library too. Remove each one once the library support
 - Charge slot 2 on 10-slot models, at HR243/244 rather than the legacy HR31/32.
 - The Gateway's 10 slots (britkat1980/giv_tcp#577). The library gives it the 2-slot layout, so slots 3-10 and the
   per-slot targets, HR240-299, are read after load_config(), and written.
+- Three-phase slots 3-10 and per-slot targets: the library has their layout but doesn't read HR240-299, or allow
+  the targets to be written. And three-phase charge/discharge rates, HR1110 / HR1108, which it reads but doesn't
+  allow to be written.
 - AC charge/discharge rate, HR313/314, on the Gateway (its rate controls, givenergy-modbus#373), Gen 1, Gen 3 and
   All in One-HY, also read after load_config() as the library only reads them on models with the AC config block.
 - HV battery modules in the second and later stacks. The library looks for them at the next device addresses
@@ -52,6 +55,8 @@ EXTENDED_CHARGE_SLOT_2 = (243, 244)
 AC_LIMIT_REGISTERS = frozenset({313, 314})
 # Models whose rates are (or include) the AC limit registers, which the library doesn't allow them
 AC_LIMIT_MODELS = frozenset({Model.GATEWAY, Model.HYBRID_GEN1, Model.HYBRID_GEN3, Model.ALL_IN_ONE_HYBRID})
+# Three-phase charge/discharge rate, a percentage of the battery rate
+THREE_PHASE_AC_LIMIT = {"charge": 1110, "discharge": 1108}
 # The model the library is shown, where it reads the real one wrongly
 LIBRARY_MODEL = {Model.ALL_IN_ONE_HYBRID: Model.HYBRID_HV_GEN3}
 HV_BMU_BASE_ADDRESS = 0x50
@@ -59,7 +64,7 @@ HV_STACK_REGISTER_STRIDE = 120
 
 # The PDU also checks writes against the library's global set. Adding to it allows nothing on its own: each
 # client's per-model set still has to include the register
-write_registers.WRITE_SAFE_REGISTERS.update(SLOT_TARGET_REGISTERS, EXTENDED_CHARGE_SLOT_2)
+write_registers.WRITE_SAFE_REGISTERS.update(SLOT_TARGET_REGISTERS, EXTENDED_CHARGE_SLOT_2, THREE_PHASE_AC_LIMIT.values())
 
 # An extra read that fails this many times in a row isn't tried again until the integration reloads: the inverter
 # doesn't support it. Fewer is a busy or briefly offline dongle
@@ -94,17 +99,33 @@ def hv_stack_modules(caps) -> list[tuple[int, int, int, int]]:
             for offset, modules in caps.bcu_stacks for k in range(modules)]
 
 
+def is_three_phase(model: Model | None) -> bool:
+    return model is not None and model not in LIBRARY_MODEL and manifest.has_capability("is_three_phase", model)
+
+
 def has_ten_slots(model: Model | None, arm_fw) -> bool:
-    """Whether the model has 10 charge/discharge slots, with a target SOC each (the Gateway as well as the library's)."""
-    return model == Model.GATEWAY or (model is not None and manifest.has_extended_slots(model, arm_fw))
+    """Whether the model has 10 charge/discharge slots, with a target SOC each: as the library says, and the
+    Gateway and three-phase."""
+    return model == Model.GATEWAY or is_three_phase(model) or (
+        model is not None and manifest.has_extended_slots(model, arm_fw))
+
+
+def reads_slot_block(model: Model | None, arm_fw) -> bool:
+    """Whether HR240-299 (slots 3-10, per-slot targets) need reading: the library only reads them on its
+    10-slot models."""
+    return has_ten_slots(model, arm_fw) and not manifest.has_extended_slots(model, arm_fw)
 
 
 def extra_write_registers(model: Model | None, arm_fw) -> frozenset[int]:
     extra = set(pause_registers(model, arm_fw))
     if has_ten_slots(model, arm_fw):
-        extra |= SLOT_TARGET_REGISTERS | set(EXTENDED_CHARGE_SLOT_2)
+        extra |= SLOT_TARGET_REGISTERS
+        if not is_three_phase(model):       # three-phase has its own slots 1-2 (HR1113-1121)
+            extra |= set(EXTENDED_CHARGE_SLOT_2)
     if model in AC_LIMIT_MODELS:
         extra |= AC_LIMIT_REGISTERS
+    if is_three_phase(model):
+        extra |= set(THREE_PHASE_AC_LIMIT.values())
     return frozenset(extra)
 
 
@@ -163,8 +184,8 @@ class GivTCPClient(Client):
             return []
         model, address = self.model, caps.inverter_address
         reads = []
-        if model == Model.GATEWAY:
-            # Slots 3-10 and every slot's target SOC: the library gives the Gateway the 2-slot layout
+        if reads_slot_block(model, caps.arm_firmware_version):
+            # Slots 3-10 and every slot's target SOC, on the Gateway and three-phase
             reads.append(("slots 3-10, HR240-299", ReadHoldingRegistersRequest(
                 base_register=240, register_count=60, device_address=address)))
         pause = pause_registers(model, caps.arm_firmware_version)
