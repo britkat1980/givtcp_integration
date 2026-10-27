@@ -36,7 +36,9 @@ DIAGNOSTIC_TEXT = {
     "Battery_Type", "Invertor_Serial_Number", "Modbus_Version", "Invertor_Firmware", "Meter_Type", "Invertor_Type",
     "Battery_Calibration_Status", "Battery_Serial_Number", "Battery_Firmware_Version", "Battery_USB_present",
     "Battery_Charge_MOS_State", "Battery_Discharge_MOS_State", "Stack_Firmware", "Stack_Charge_MOS_State",
-    "Stack_Discharge_MOS_State", "Meter_Status", "Battery_Cells",
+    "Stack_Discharge_MOS_State", "Meter_Status", "Battery_Cells", "Gateway_Software_Version", "Gateway_State",
+    "Gateway_Mode", "Parallel_Total_AIO_Number", "Parallel_Total_AIO_Online_Number",
+    *(f"AIO_{n}_Serial_Number" for n in (1, 2, 3)),
 }
 TIMESTAMPS = {"Invertor_Time", "Last_Updated_Time", "Charge_Completion_Time", "Discharge_Completion_Time"}
 SOC_KEYS = {"SOC", "Battery_SOC", "Stack_SOC_High", "Stack_SOC_Low", "Stack_SOC_Difference"}
@@ -108,6 +110,8 @@ def _sources(data: GivData):
         yield Source("battery", name)
     for name in data.meters:
         yield Source("meter", name)
+    for name in data.aios:
+        yield Source("aio", name)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,

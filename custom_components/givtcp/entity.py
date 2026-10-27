@@ -25,8 +25,8 @@ _LOGGER = logging.getLogger(__name__)
 class Source:
     """Where an entity's value lives: the inverter, a battery, a battery stack or a meter."""
 
-    kind: str           # "inverter", "battery", "stack" or "meter"
-    name: str = ""      # battery serial, "Battery_Stack_1" or "Meter_ID1"; "" for the inverter
+    kind: str           # "inverter", "battery", "stack", "meter" or "aio" (a Gateway's All-in-One)
+    name: str = ""      # battery serial, "Battery_Stack_1", "Meter_ID1" or "AIO_1"; "" for the inverter
 
     def values(self, data: GivData) -> dict[str, Any]:
         if self.kind == "battery":
@@ -35,6 +35,8 @@ class Source:
             return data.stacks.get(self.name, {})
         if self.kind == "meter":
             return data.meters.get(self.name, {})
+        if self.kind == "aio":
+            return data.aios.get(self.name, {})
         return data.inverter
 
 
@@ -92,11 +94,13 @@ def device_info(coordinator: GivTCPCoordinator, source: Source) -> DeviceInfo:
             sw_version=str(data.batteries.get(source.name, {}).get("Battery_Firmware_Version") or "") or None,
             via_device=(DOMAIN, f"{serial}_{stack}") if stack else (DOMAIN, serial),
         )
+    aio_serial = data.aios.get(source.name, {}).get(f"{source.name}_Serial_Number") if source.kind == "aio" else None
     return DeviceInfo(
         identifiers={(DOMAIN, f"{serial}_{source.name}")},
         name=f"GivTCP {source.name.replace('_', ' ')}",
         manufacturer=MANUFACTURER,
-        model="Battery stack" if source.kind == "stack" else "Meter",
+        model={"stack": "Battery stack", "meter": "Meter", "aio": "All-in-One"}[source.kind],
+        serial_number=aio_serial,
         via_device=(DOMAIN, serial),
     )
 

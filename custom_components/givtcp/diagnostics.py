@@ -31,7 +31,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: GivTCPC
     serials = [data.serial, *data.batteries] if data else []
     return {
         "entry": async_redact_data({**entry.data, **entry.options}, TO_REDACT),
-        "capabilities": _redact_serials({"device_type": caps.device_type.name, "arm_firmware": caps.arm_firmware_version,
+        "capabilities": _redact_serials({"device_type": caps.device_type.name,
+                                         "real_model": getattr(coordinator.client.model, "name", None),
+                                         "arm_firmware": caps.arm_firmware_version,
                                          "is_hv": caps.is_hv, "bcu_stacks": caps.bcu_stacks,
                                          "lv_batteries": caps.lv_battery_addresses}, serials) if caps else None,
         "data": _redact_serials(asdict(data), serials) if data else None,

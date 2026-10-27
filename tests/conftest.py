@@ -21,7 +21,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 # Serial numbers in the captures (redacted, but stable)
 SERIALS = {"hybrid_gen2": "EA2302G000", "all_in_one": "CH2414G000", "ac": "CE2231G000",
-           "hybrid_hv_gen3": "SH2000G000", "hybrid_hv_gen3_2stacks": "SH2000G000"}
+           "hybrid_hv_gen3": "SH2000G000", "hybrid_hv_gen3_2stacks": "SH2000G000", "aio_hybrid": "SH2000G000",
+           "gateway": "GW2412G000", "gateway_one_online": "GW2412G000"}
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +52,7 @@ def _serial_registers(serial: str) -> list[int]:
     return [int.from_bytes(raw[i:i + 2], "big") for i in range(0, 10, 2)]
 
 
-def _complete_hv_gen3(mock: RecordingMockPlant, stacks: int) -> None:
+def _complete_hv_gen3(mock: RecordingMockPlant, stacks: int, device_type: int = 0x8102) -> None:
     """Fill in what the HV Gen 3 capture lacks, to run as a whole plant.
 
     The capture was taken in a steady state, so it has neither the identity block detect reads (HR 0-59), nor the
@@ -60,7 +61,7 @@ def _complete_hv_gen3(mock: RecordingMockPlant, stacks: int) -> None:
     stack is copied from the first: its BCU at 0x71, and its modules at 0x50 + k, IR 180-239 (120 on from the first
     stack's), with serials of their own.
     """
-    identity = {0: 0x8102, 19: 3000, 21: 295, **dict(zip(range(8, 13), _serial_registers("WG2000G000"), strict=True)),
+    identity = {0: device_type, 19: 3000, 21: 295, **dict(zip(range(8, 13), _serial_registers("WG2000G000"), strict=True)),
                 **dict(zip(range(13, 18), _serial_registers("SH2000G000"), strict=True))}
     settings = {110: 4, 111: 50, 112: 50, 116: 100}
     for reg in range(120):
@@ -78,11 +79,19 @@ def _complete_hv_gen3(mock: RecordingMockPlant, stacks: int) -> None:
 
 
 async def serve(name: str) -> tuple[RecordingMockPlant, str, int]:
-    """Serve a capture; hybrid_hv_gen3 and hybrid_hv_gen3_2stacks are its HV Gen 3 with one or two stacks."""
-    capture = "hybrid_hv_gen3" if name.startswith("hybrid_hv_gen3") else name
+    """Serve a capture.
+
+    hybrid_hv_gen3 and hybrid_hv_gen3_2stacks are its HV Gen 3 with one or two stacks. There's no All in One-HY
+    capture, so aio_hybrid stands in with the HV Gen 3's, as an All in One-HY (DTC 0x8201): the library sees the
+    same capabilities in both, but for the three-phase registers it wrongly reads on an All in One-HY.
+    """
+    capture = "hybrid_hv_gen3" if name.startswith("hybrid_hv_gen3") or name == "aio_hybrid" else name
+    capture = "gateway" if name.startswith("gateway") else capture
     mock = RecordingMockPlant.from_capture(FIXTURES / f"{capture}.capture")
+    if name == "gateway_one_online":     # one of its two All-in-Ones online: not in parallel mode
+        mock.devices[0x11][IR(1701)] = 1
     if capture == "hybrid_hv_gen3":
-        _complete_hv_gen3(mock, 2 if name.endswith("2stacks") else 1)
+        _complete_hv_gen3(mock, 2 if name.endswith("2stacks") else 1, 0x8201 if name == "aio_hybrid" else 0x8102)
     host, port = await mock.start()
     return mock, host, port
 

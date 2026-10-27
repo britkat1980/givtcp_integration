@@ -110,12 +110,12 @@ class GivTCPCoordinator(DataUpdateCoordinator[GivData]):
         if self.client.plant.capabilities is None:
             stored = self.config_entry.data.get(CONF_CAPABILITIES)
             try:
-                self.client.plant.capabilities = PlantCapabilities.from_dict(stored) if stored else None
+                if stored:
+                    self.client.use_capabilities(PlantCapabilities.from_dict(stored))
             except (ValueError, KeyError) as err:
                 _LOGGER.info("Detecting the inverter's batteries and meters again: %s", err)
             if self.client.plant.capabilities is None:
-                caps = await self.client.detect()
-                self._save_capabilities(caps)
+                self._save_capabilities(await self.client.detect())
             reason = unsupported_reason(self.client.plant)
             if reason:
                 raise UpdateFailed(f"This inverter isn't supported yet ({reason})")
@@ -127,15 +127,15 @@ class GivTCPCoordinator(DataUpdateCoordinator[GivData]):
 
     def _follow_firmware(self) -> None:
         # A firmware update can change what the inverter has (Gen 3 gains 10 slots after ARM 302)
-        caps, inv = self.client.plant.capabilities, self.client.plant.inverter
+        caps, inv = self.client.detected, self.client.plant.inverter
         try:
             arm_fw = int(inv.arm_firmware_version) if inv.arm_firmware_version is not None else None
         except (TypeError, ValueError):
             return
-        if arm_fw is not None and caps.arm_firmware_version != arm_fw:
+        if caps is not None and arm_fw is not None and caps.arm_firmware_version != arm_fw:
             _LOGGER.info("Inverter ARM firmware is now %s (was %s)", arm_fw, caps.arm_firmware_version)
             caps = caps.model_copy(update={"arm_firmware_version": arm_fw})
-            self.client.plant.capabilities = caps
+            self.client.use_capabilities(caps)
             self._save_capabilities(caps)
 
     async def _async_update_data(self) -> GivData:
@@ -184,6 +184,8 @@ class GivTCPCoordinator(DataUpdateCoordinator[GivData]):
         data.inverter["Last_Updated_Time"] = dt_util.now()
         data.inverter["Data_Age"] = round((datetime.now(UTC) - max(stamps)).total_seconds(), 1) \
             if stamps else -1
+        if "Mode" not in data.controls:
+            return      # nothing to control: a Gateway not in parallel mode, say
         for op in (TIMED_FORCE_CHARGE, TIMED_FORCE_EXPORT, TIMED_PAUSE_CHARGE, TIMED_PAUSE_DISCHARGE):
             data.controls[op] = "Running" if op in self._stored["timed"] else "Normal"
 

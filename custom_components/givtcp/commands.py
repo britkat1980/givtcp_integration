@@ -10,7 +10,8 @@ from datetime import datetime, time, timedelta
 from typing import Any
 
 from givenergy_modbus.client import commands as gecommands
-from givenergy_modbus.model.inverter import SinglePhaseInverter
+from givenergy_modbus.model.inverter import Model, SinglePhaseInverter
+from givenergy_modbus.model.slot_map import EXTENDED_SLOTS
 from givenergy_modbus.pdu import TransparentRequest, WriteHoldingRegisterRequest
 
 from .const import BATTERY_PAUSE_MODES, MAX_BATTERY_LIMIT_PERCENT, MIN_SOC, MODES
@@ -57,13 +58,35 @@ def _limit_percent(data: GivData, watts: float) -> int:
     return battery_limit_percent(watts, capacity, data.model.batmaxrate)
 
 
+def _gateway(data: GivData) -> bool:
+    return data.model.model == Model.GATEWAY
+
+
+def _ac_limit_percent(data: GivData, watts: float) -> int:
+    # The Gateway's rate is its AC limit, a percentage of the All-in-Ones' battery rate. Above it means full rate,
+    # and the register rejects 0%, so the closest to a pause is 1%
+    if not data.model.batmaxrate:
+        raise CommandError("the All-in-Ones' battery rate isn't known, so the rate can't be set")
+    return int(max(1, min(100, round(watts / data.model.batmaxrate * 100))))
+
+
 def charge_rate(data: GivData, watts: float) -> Requests:
-    """The battery charge rate in W, as HR111's percentage of battery capacity (at most 50)."""
+    """The battery charge rate in W, as HR111's percentage of battery capacity (at most 50), or the Gateway's AC limit."""
+    if _gateway(data):
+        return gecommands.set_battery_charge_limit_ac(_ac_limit_percent(data, watts))
     return gecommands.set_battery_charge_limit(_limit_percent(data, watts))
 
 
 def discharge_rate(data: GivData, watts: float) -> Requests:
+    if _gateway(data):
+        return gecommands.set_battery_discharge_limit_ac(_ac_limit_percent(data, watts))
     return gecommands.set_battery_discharge_limit(_limit_percent(data, watts))
+
+
+def _full_rate(data: GivData, kind: str) -> Requests:
+    if _gateway(data):
+        return getattr(gecommands, f"set_battery_{kind}_limit_ac")(100)
+    return getattr(gecommands, f"set_battery_{kind}_limit")(MAX_BATTERY_LIMIT_PERCENT)
 
 
 def charge_rate_ac(percent: int) -> Requests:
@@ -135,7 +158,9 @@ def slot_registers(inv: SinglePhaseInverter, data: GivData, kind: str, slot: int
         raise CommandError(f"This inverter has {data.slot_count} {kind} slots, not {slot}")
     if kind == "charge" and slot == 2 and data.slot_count == 10:
         return EXTENDED_CHARGE_SLOT_2       # 10-slot firmware keeps charge slot 2 at HR243/244, not HR31/32
-    slots = inv.slot_map.charge_slots if kind == "charge" else inv.slot_map.discharge_slots
+    # The library gives the Gateway the 2-slot layout, though it has 10 slots
+    layout = EXTENDED_SLOTS if data.slot_count == 10 else inv.slot_map
+    slots = layout.charge_slots if kind == "charge" else layout.discharge_slots
     if slot > len(slots):
         raise CommandError(f"This inverter has {len(slots)} {kind} slots, not {slot}")
     return slots[slot - 1]
@@ -224,7 +249,7 @@ def force_charge(inv: SinglePhaseInverter, data: GivData, minutes: int, now: dat
         reqs += slot_target("charge", 1, 100)
     reqs += slot(inv, data, "charge", 1, start, end)
     reqs += inv.set_enable_charge(True)
-    reqs += gecommands.set_battery_charge_limit(MAX_BATTERY_LIMIT_PERCENT)
+    reqs += _full_rate(data, "charge")
     if "pause_mode" in revert:
         reqs += pause_mode("Disabled")
     return last_write_per_register(reqs), revert
@@ -261,7 +286,7 @@ def force_export(inv: SinglePhaseInverter, data: GivData, minutes: int, now: dat
     revert = {k: v for k, v in revert.items() if v is not None}
     start, end = _slot_now(now, minutes)
     reqs = inv.set_battery_soc_reserve(MIN_SOC)
-    reqs += gecommands.set_battery_discharge_limit(MAX_BATTERY_LIMIT_PERCENT)
+    reqs += _full_rate(data, "discharge")
     # Timed Export on slot 1 only: set_mode_storage would also clear discharge slot 2, which isn't reverted
     reqs += inv.set_discharge_mode_max_power() + inv.set_enable_discharge(True)
     reqs += slot(inv, data, "discharge", 1, start, end)
@@ -291,7 +316,7 @@ def pause_charge(data: GivData) -> tuple[Requests, dict]:
     rate = data.controls.get("Battery_Charge_Rate")
     if rate is None:
         raise CommandError("the current charge rate isn't known, so it couldn't be put back")
-    return gecommands.set_battery_charge_limit(0), {"charge_rate": rate}
+    return charge_rate(data, 0), {"charge_rate": rate}
 
 
 def pause_charge_revert(data: GivData, revert: dict) -> Requests:
@@ -302,7 +327,7 @@ def pause_discharge(data: GivData) -> tuple[Requests, dict]:
     rate = data.controls.get("Battery_Discharge_Rate")
     if rate is None:
         raise CommandError("the current discharge rate isn't known, so it couldn't be put back")
-    return gecommands.set_battery_discharge_limit(0), {"discharge_rate": rate}
+    return discharge_rate(data, 0), {"discharge_rate": rate}
 
 
 def pause_discharge_revert(data: GivData, revert: dict) -> Requests:

@@ -13,13 +13,14 @@ import logging
 from typing import Any
 
 from givenergy_modbus.model.hv_bcu import Bmu, decode_cells_temps_serial
-from givenergy_modbus.model.inverter import Model, SinglePhaseInverterRegisterGetter
+from givenergy_modbus.model.battery import State
+from givenergy_modbus.model.inverter import Model, SinglePhaseInverterRegisterGetter, WorkMode
 from givenergy_modbus.model.plant import Plant
 from givenergy_modbus.model.register import IR
 from givenergy_modbus.model.register_cache import RegisterCache
 
 from .const import BATTERY_CALIBRATION, BATTERY_PAUSE_MODES, MIN_SOC, ROUNDING_DIP_KWH, TODAY_RESET_WINDOW_MINUTES
-from .modbus import PAUSE_SLOT_REGISTERS, hv_stack_modules, pause_registers
+from .modbus import PAUSE_SLOT_REGISTERS, hv_stack_modules, pause_registers, real_model
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ PV_STRING_VI_UNSUPPORTED = (Model.AC, Model.ALL_IN_ONE)
 DC_HYBRID_MODELS = (Model.HYBRID_GEN1, Model.HYBRID_GEN2, Model.HYBRID_GEN3, Model.HYBRID_GEN4,
                     Model.HYBRID_HV_GEN3, Model.ALL_IN_ONE_HYBRID)
 # Models with 10 charge/discharge slots and per-slot target SOCs (Gen 3 only from ARM firmware 303)
-TEN_SLOT_MODELS = (Model.ALL_IN_ONE, Model.ALL_IN_ONE_HYBRID, Model.HYBRID_GEN4, Model.HYBRID_HV_GEN3)
+TEN_SLOT_MODELS = (Model.ALL_IN_ONE, Model.ALL_IN_ONE_HYBRID, Model.GATEWAY, Model.HYBRID_GEN4, Model.HYBRID_HV_GEN3)
 COMBINED_GENERATION_MODELS = (Model.HYBRID_GEN3, Model.HYBRID_GEN4, Model.HYBRID_HV_GEN3, Model.ALL_IN_ONE_HYBRID,
                               Model.AIO_COMMERCIAL)
 # Max battery current (A) by device type code for HV Gen 3 hybrids; unlisted models assume 25A
@@ -68,6 +69,7 @@ class GivData:
     battery_stack: dict[str, str] = field(default_factory=dict)          # battery/module serial: stack name
     stacks: dict[str, dict[str, Any]] = field(default_factory=dict)      # "Battery_Stack_1": values
     meters: dict[str, dict[str, Any]] = field(default_factory=dict)      # "Meter_ID1": values
+    aios: dict[str, dict[str, Any]] = field(default_factory=dict)        # a Gateway's "AIO_1": values
     model: InverterModel = field(default_factory=InverterModel)
     slot_count: int = 2
     pause_supported: bool = False
@@ -84,12 +86,7 @@ def unsupported_reason(plant: Plant) -> str | None:
         return "not_detected"
     if caps.is_ems:
         return "ems"
-    if caps.is_gateway:
-        return "gateway"
-    if caps.device_type == Model.ALL_IN_ONE_HYBRID:
-        # The library reads it as three-phase, which it isn't (GivTCP patches that module-wide)
-        return "aio_hybrid"
-    if caps.is_three_phase:
+    if caps.is_three_phase:     # not the All in One-HY, which the client shows the library as single-phase
         return "three_phase"
     device_type = plant.register_caches.get(caps.inverter_address, {}).get(_HR0)
     if device_type is not None and hex(device_type)[2:4] == "23":
@@ -108,9 +105,11 @@ def _enum_text(value) -> str | None:
 
 
 def _resolved_model(plant: Plant) -> Model | None:
-    # The library's device .model is only the family (HYBRID); detect resolves the generation
-    caps = plant.capabilities
-    return caps.device_type if caps is not None else getattr(plant.inverter, "model", None)
+    # The library's device .model is only the family (HYBRID); detect resolves the generation, and real_model
+    # undoes the model the client shows the library for an All in One-HY
+    if plant.capabilities is None:
+        return getattr(plant.inverter, "model", None)
+    return real_model(plant)
 
 
 def battery_count(plant: Plant) -> int:
@@ -314,10 +313,15 @@ def get_controls(plant: Plant, m: InverterModel, previous: GivData | None) -> di
     controls["Eco_Mode"] = _flag(inv.battery_power_mode, previous, "Eco_Mode")
     controls["Real_Time_Control"] = _flag(inv.enable_rtc, previous, "Real_Time_Control")
 
-    # HR111/112 can be unread if the HR(60-119) block failed: fall back to the previous values
-    for key, limit in (("Battery_Discharge_Rate", inv.battery_discharge_limit),
-                       ("Battery_Charge_Rate", inv.battery_charge_limit)):
-        rate = battery_rate_watts(limit, m)
+    # HR111/112 can be unread if the HR(60-119) block failed: fall back to the previous values. On the Gateway
+    # the rates are the AC limits (HR313/314), a percentage of the All-in-Ones' battery rate
+    gateway = m.model == Model.GATEWAY
+    for key, limit in (("Battery_Discharge_Rate", inv.battery_discharge_limit_ac if gateway else inv.battery_discharge_limit),
+                       ("Battery_Charge_Rate", inv.battery_charge_limit_ac if gateway else inv.battery_charge_limit)):
+        if gateway:
+            rate = int(m.batmaxrate * limit / 100) if limit is not None and m.batmaxrate else None
+        else:
+            rate = battery_rate_watts(limit, m)
         if rate is not None:
             controls[key] = rate
         elif previous and key in previous.controls:
@@ -531,18 +535,21 @@ def _hold_rounding_dip(new, old, hold=True):
     return new
 
 
-def _guard_energy(values: dict[str, Any], previous: GivData | None, inv_time: datetime | None) -> None:
+def _guard_energy(values: dict[str, Any], previous: GivData | None, inv_time: datetime | None,
+                  old_values: dict[str, Any] | None = None) -> None:
     """Stop energy counters going backwards, which Home Assistant's statistics count as a meter reset.
 
     Lifetime totals only rise, unless they wrap (the 16-bit ones wrap at 6553.5kWh). Today counters only drop
-    close to the inverter's midnight or once its date has moved on.
+    close to the inverter's midnight or once its date has moved on. old_values are the last poll's values, when
+    they aren't the inverter's (eg. a Gateway's All-in-One).
     """
     if previous is None:
         return
+    old_values = previous.inverter if old_values is None else old_values
     old_time = previous.inverter.get("Invertor_Time")
     new_day = isinstance(old_time, datetime) and inv_time is not None and old_time.date() != inv_time.date()
     for key, new in values.items():
-        old = previous.inverter.get(key)
+        old = old_values.get(key)
         if not isinstance(new, (int, float)) or not isinstance(old, (int, float)) or new >= old:
             continue
         if key.endswith("_Total_kWh"):
@@ -552,21 +559,148 @@ def _guard_energy(values: dict[str, Any], previous: GivData | None, inv_time: da
             values[key] = old
 
 
+def _inverter_time(system_time: datetime | None, previous: GivData | None, timezone: tzinfo,
+                   now: datetime) -> datetime:
+    # A default (year 2000) or unread clock: keep the last good time, or use ours
+    if system_time is None or system_time.year == 2000:
+        return (previous.inverter.get("Invertor_Time") if previous else None) or now
+    return system_time.replace(tzinfo=timezone)
+
+
+def _enum_name(enum, value) -> str | None:
+    # The Gateway model keeps enums as raw values
+    try:
+        return enum(value).name.replace("_", " ").capitalize() if value is not None else None
+    except ValueError:
+        return None
+
+
+# The Gateway's All-in-Ones: 6kW and 13.5kWh each
+AIO_BATTERY_RATE = 6000
+AIO_BATTERY_KWH = 13.5
+
+
+def build_gateway(plant: Plant, previous: GivData | None, timezone: tzinfo, now: datetime | None = None) -> GivData:
+    """Port of GivTCP's processGatewayInfo.
+
+    The library's Gateway model covers its own live values (IR1600+); its settings and clock come from the
+    inverter view over the same registers. Each All-in-One behind it is an AIO_<n> of its own. Its controls
+    only apply in parallel mode, with more than one All-in-One online: otherwise each is controlled directly.
+    """
+    gw, hr = plant.gateway, plant.inverter
+    count = int(gw.parallel_aio_num or 0)
+    m = InverterModel(model=Model.GATEWAY, invmaxrate=hr.inverter_max_power,
+                      batmaxrate=AIO_BATTERY_RATE * count or None, batterycapacity=AIO_BATTERY_KWH * count or None)
+    data = GivData(serial=plant.inverter_serial, model=m, slot_count=10, pause_supported=pause_supported(plant))
+    out = data.inverter
+    now = now or datetime.now(timezone)
+    inv_time = _inverter_time(hr.system_time, previous, timezone, now)
+    out.update({
+        "Invertor_Time": inv_time,
+        "Invertor_Type": Model.GATEWAY.name.capitalize(),
+        "Invertor_Serial_Number": data.serial,
+        "Gateway_Software_Version": gw.software_version,
+        "Parallel_Total_AIO_Number": gw.parallel_aio_num,
+        "Parallel_Total_AIO_Online_Number": gw.parallel_aio_online_num,
+        "Gateway_State": _enum_name(State, gw.aio_state),
+        "Gateway_Mode": _enum_name(WorkMode, gw.work_mode),
+        "Export_Limit": hr.grid_port_max_power_output,
+        "Battery_Capacity_kWh": m.batterycapacity,
+        "Invertor_Max_Inv_Rate": m.invmaxrate,
+        "Invertor_Max_Bat_Rate": m.batmaxrate,
+        "Grid_Voltage": gw.v_grid,
+        "Grid_Current": gw.i_grid,
+        "Load_Voltage": gw.v_load,
+        "Load_Current": gw.i_load,
+        "PV_Current": gw.i_pv,
+        "Grid_Power": gw.p_ac1,     # negative for import
+        "PV_Power": gw.p_pv,
+        "Load_Power": gw.p_load,
+        "Battery_Power": gw.p_aio_total,    # the All-in-Ones' total, positive for discharge
+        "Liberty_Power": gw.p_liberty,
+        "Grid_Relay_Voltage": gw.v_grid_relay,
+        "Inverter_Relay_Voltage": gw.v_inverter_relay,
+        "Invertor_Power": gw.p_aio_total,
+    })
+
+    if (gw.parallel_aio_online_num or 0) > 1:
+        data.controls = get_controls(plant, m, previous)
+        data.timeslots, targets = get_timeslots(plant, previous)
+        data.controls.update(targets)
+
+    battery_power = gw.p_aio_total or 0
+    socs = [soc for soc in (gw.aio1_soc, gw.aio2_soc, gw.aio3_soc) if soc]
+    if count > 1 and socs:
+        soc = int(sum(socs) / len(socs))
+        out["SOC"] = soc
+        if m.batterycapacity:
+            out["SOC_kWh"] = round(soc * m.batterycapacity / 100, 2)
+        out["Charge_Time_Remaining"] = out["Discharge_Time_Remaining"] = 0
+        reserve, target = data.controls.get("Battery_Power_Reserve"), data.controls.get("Target_SOC")
+        if battery_power > 0 and reserve is not None and m.batterycapacity:
+            minutes = max(int(m.batterycapacity * ((soc - reserve) / 100) / (battery_power / 1000) * 60), 0)
+            out["Discharge_Time_Remaining"] = minutes
+            out["Discharge_Completion_Time"] = now + timedelta(minutes=minutes)
+        elif battery_power < 0 and target is not None and m.batterycapacity:
+            minutes = max(int(m.batterycapacity * ((target - soc) / 100) / (-battery_power / 1000) * 60), 0)
+            out["Charge_Time_Remaining"] = minutes
+            out["Charge_Completion_Time"] = now + timedelta(minutes=minutes)
+
+    grid_power = gw.p_ac1 or 0
+    out.update(power_flows(gw.p_pv, gw.p_load, max(-grid_power, 0), max(grid_power, 0),
+                           max(-battery_power, 0), max(battery_power, 0)))
+
+    for n in (1, 2, 3):
+        if not getattr(gw, f"e_aio{n}_charge_today", None):
+            continue
+        aio = {
+            "AC_Charge_Energy_Today_kWh": getattr(gw, f"e_aio{n}_charge_today"),
+            "AC_Charge_Energy_Total_kWh": getattr(gw, f"e_aio{n}_charge_total"),
+            "AC_Discharge_Energy_Today_kWh": getattr(gw, f"e_aio{n}_discharge_today"),
+            "AC_Discharge_Energy_Total_kWh": getattr(gw, f"e_aio{n}_discharge_total"),
+            "SOC": getattr(gw, f"aio{n}_soc"),
+            "Invertor_Power": getattr(gw, f"p_aio{n}_inverter"),
+            f"AIO_{n}_Serial_Number": getattr(gw, f"aio{n}_serial_number"),
+        }
+        _guard_energy(aio, previous, inv_time, previous.aios.get(f"AIO_{n}", {}) if previous else None)
+        data.aios[f"AIO_{n}"] = {k: v for k, v in aio.items() if v is not None}
+
+    out.update({
+        "Export_Energy_Today_kWh": gw.e_grid_export_today,
+        "PV_Energy_Today_kWh": gw.e_pv_today,
+        "Import_Energy_Today_kWh": gw.e_grid_import_today,
+        "Load_Energy_Today_kWh": gw.e_load_today,
+        "Battery_Charge_Energy_Today_kWh": gw.e_battery_charge_today,
+        "Battery_Discharge_Energy_Today_kWh": gw.e_battery_discharge_today,
+        "Parallel_Total_Charge_Energy_Today_kWh": gw.e_aio_charge_today,
+        "Parallel_Total_Discharge_Energy_Today_kWh": gw.e_aio_discharge_today,
+        "Import_Energy_Total_kWh": gw.e_grid_import_total,
+        "PV_Energy_Total_kWh": gw.e_pv_total,
+        "Export_Energy_Total_kWh": gw.e_grid_export_total,
+        "Load_Energy_Total_kWh": gw.e_load_total,
+        "Battery_Charge_Energy_Total_kWh": gw.e_battery_charge_total,
+        "Battery_Discharge_Energy_Total_kWh": gw.e_battery_discharge_total,
+        "Parallel_Total_Charge_Energy_Total_kWh": gw.e_aio_charge_total,
+        "Parallel_Total_Discharge_Energy_Total_kWh": gw.e_aio_discharge_total,
+    })
+
+    get_meters(plant, data)
+    _guard_energy(out, previous, inv_time)
+    data.inverter = {k: v for k, v in out.items() if v is not None}
+    return data
+
+
 def build(plant: Plant, previous: GivData | None, timezone: tzinfo, now: datetime | None = None) -> GivData:
-    """Port of GivTCP's processInverterInfo for single-phase inverters."""
+    """Port of GivTCP's processInverterInfo for single-phase inverters, or processGatewayInfo for a Gateway."""
+    if plant.capabilities.is_gateway:
+        return build_gateway(plant, previous, timezone, now)
     inv = plant.inverter
     m = inverter_model(plant)
     data = GivData(serial=plant.inverter_serial, model=m, slot_count=slot_count(plant),
                    pause_supported=pause_supported(plant))
     out = data.inverter
     now = now or datetime.now(timezone)
-
-    # A default (year 2000) or unread clock: keep the last good time, or use ours
-    if inv.system_time is None or inv.system_time.year == 2000:
-        inv_time = previous.inverter.get("Invertor_Time") if previous else None
-        inv_time = inv_time or now
-    else:
-        inv_time = inv.system_time.replace(tzinfo=timezone)
+    inv_time = _inverter_time(inv.system_time, previous, timezone, now)
     out["Invertor_Time"] = inv_time
 
     dc_hybrid = m.model in DC_HYBRID_MODELS

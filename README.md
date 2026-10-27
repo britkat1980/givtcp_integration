@@ -12,7 +12,9 @@ This is [GivTCP](https://github.com/britkat1980/giv_tcp) as a native integration
 | HV Gen 3 hybrid | Supported, with any number of battery stacks |
 | AC-coupled | Supported |
 | All-in-One | Supported |
-| All in One-HY, three-phase, EMS, Gateway, PV-only | Not yet: keep using the GivTCP add-on |
+| All in One-HY | Supported |
+| Gateway | Supported, with up to 3 All-in-Ones. Its controls only appear in parallel mode (more than one All-in-One online); otherwise, control each All-in-One directly |
+| Three-phase, EMS, PV-only | Not yet: keep using the GivTCP add-on |
 
 If your inverter isn't supported yet, setup tells you so and doesn't add it.
 
@@ -44,7 +46,7 @@ Two GivTCP clients polling one dongle can make it drop connections, so don't run
 
 ## What you get
 
-**Sensors:** power (PV, grid, battery, load, EPS, flows between them), energy today and total, battery SOC and time to full or empty, voltages, currents, frequencies and temperatures, and inverter details. Each battery and battery stack, and each meter, is a device of its own. Cell voltages and temperatures are there but off by default.
+**Sensors:** power (PV, grid, battery, load, EPS, flows between them), energy today and total, battery SOC and time to full or empty, voltages, currents, frequencies and temperatures, and inverter details. Each battery and battery stack, each meter, and each All-in-One behind a Gateway (`sensor.givtcp_aio_1_soc`...) is a device of its own. Cell voltages and temperatures are there but off by default.
 
 **Controls:**
 
