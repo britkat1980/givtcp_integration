@@ -41,6 +41,8 @@ DIAGNOSTIC_TEXT = {
     "Gateway_Mode", "Parallel_Total_AIO_Number", "Parallel_Total_AIO_Online_Number",
     *(f"AIO_{n}_Serial_Number" for n in (1, 2, 3)),
     "status", "System_Mode", "Battery_Priority", "DC_Status", "Invertor_Software", "Start_Delay_Time",
+    "Plant_Status", "Inverter_Count", "Meter_Count", "Car_Charge_Count", "Serial_Number",
+    *(f"Meter_{n}_Status" for n in range(1, 9)),
 }
 TIMESTAMPS = {"Invertor_Time", "Last_Updated_Time", "Charge_Completion_Time", "Discharge_Completion_Time"}
 SOC_KEYS = {"SOC", "Battery_SOC", "Stack_SOC_High", "Stack_SOC_Low", "Stack_SOC_Difference"}
@@ -76,6 +78,11 @@ def describe(key: str) -> SensorEntityDescription:
                                        native_unit_of_measurement=UnitOfApparentPower.VOLT_AMPERE, state_class=M)
     if key == "Power_Factor":
         return SensorEntityDescription(key=key, state_class=M)
+    if key == "Remaining_Battery_Wh":
+        return SensorEntityDescription(key=key, device_class=SensorDeviceClass.ENERGY_STORAGE,
+                                       native_unit_of_measurement=UnitOfEnergy.WATT_HOUR, state_class=M)
+    if key.endswith("_Compensation"):
+        return SensorEntityDescription(key=key, native_unit_of_measurement=UnitOfPower.WATT, state_class=M)
     if key.endswith("Power") or "_to_" in key:
         return SensorEntityDescription(key=key, device_class=SensorDeviceClass.POWER,
                                        native_unit_of_measurement=UnitOfPower.WATT, state_class=M)
@@ -119,6 +126,8 @@ def _sources(data: GivData):
         yield Source("meter", name)
     for name in data.aios:
         yield Source("aio", name)
+    for name in data.managed:
+        yield Source("managed", name)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,

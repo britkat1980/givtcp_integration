@@ -14,6 +14,7 @@ from givenergy_modbus.exceptions import (
     RefreshFailed,
     RefreshPartiallySucceeded,
 )
+from givenergy_modbus.model.ems import Ems
 from givenergy_modbus.model.inverter import SinglePhaseInverter
 from givenergy_modbus.model.plant import PlantCapabilities
 
@@ -98,6 +99,10 @@ class GivTCPCoordinator(DataUpdateCoordinator[GivData]):
     @property
     def inverter(self) -> SinglePhaseInverter:
         return self.client.plant.inverter
+
+    @property
+    def ems(self) -> Ems | None:
+        return self.client.plant.ems
 
     # --- reading ---------------------------------------------------------------------------------------------
 

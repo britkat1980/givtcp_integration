@@ -25,8 +25,10 @@ _LOGGER = logging.getLogger(__name__)
 class Source:
     """Where an entity's value lives: the inverter, a battery, a battery stack or a meter."""
 
-    kind: str           # "inverter", "battery", "stack", "meter" or "aio" (a Gateway's All-in-One)
-    name: str = ""      # battery serial, "Battery_Stack_1", "Meter_ID1" or "AIO_1"; "" for the inverter
+    # "inverter", "battery", "stack", "meter", "aio" (a Gateway's All-in-One) or "managed" (an EMS's inverter)
+    kind: str
+    # battery serial, "Battery_Stack_1", "Meter_ID1", "AIO_1" or managed inverter serial; "" for the inverter
+    name: str = ""
 
     def values(self, data: GivData) -> dict[str, Any]:
         if self.kind == "battery":
@@ -37,6 +39,8 @@ class Source:
             return data.meters.get(self.name, {})
         if self.kind == "aio":
             return data.aios.get(self.name, {})
+        if self.kind == "managed":
+            return data.managed.get(self.name, {})
         return data.inverter
 
 
@@ -93,6 +97,15 @@ def device_info(coordinator: GivTCPCoordinator, source: Source) -> DeviceInfo:
             serial_number=source.name,
             sw_version=str(data.batteries.get(source.name, {}).get("Battery_Firmware_Version") or "") or None,
             via_device=(DOMAIN, f"{serial}_{stack}") if stack else (DOMAIN, serial),
+        )
+    if source.kind == "managed":
+        return DeviceInfo(
+            identifiers={(DOMAIN, source.name)},
+            name=f"GivTCP {source.name}",
+            manufacturer=MANUFACTURER,
+            model="Inverter (managed by EMS)",
+            serial_number=source.name,
+            via_device=(DOMAIN, serial),
         )
     aio_serial = data.aios.get(source.name, {}).get(f"{source.name}_Serial_Number") if source.kind == "aio" else None
     return DeviceInfo(

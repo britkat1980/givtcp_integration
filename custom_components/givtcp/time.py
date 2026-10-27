@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .coordinator import GivTCPConfigEntry, GivTCPCoordinator
 from .data import GivData
 from .entity import GivTCPEntity, add_entities_as_found
-from .select import PAUSE_SLOT_KEY, SLOT_KEY, slot_write
+from .select import is_slot_key, slot_write
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,
@@ -20,7 +20,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,
 
     def candidates(data: GivData):
         for key in data.timeslots:
-            if SLOT_KEY.fullmatch(key) or PAUSE_SLOT_KEY.fullmatch(key):
+            if is_slot_key(key):
                 yield key, lambda key=key: SlotTime(coordinator, key)
 
     async def check(key: str) -> bool:

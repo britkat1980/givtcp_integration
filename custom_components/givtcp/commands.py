@@ -10,6 +10,7 @@ from datetime import datetime, time, timedelta
 from typing import Any
 
 from givenergy_modbus.client import commands as gecommands
+from givenergy_modbus.model.ems import Ems
 from givenergy_modbus.model.inverter import Model, SinglePhaseInverter
 from givenergy_modbus.model.inverter_threephase import ThreePhaseInverter
 from givenergy_modbus.model.slot_map import EXTENDED_SLOTS
@@ -17,7 +18,14 @@ from givenergy_modbus.pdu import TransparentRequest, WriteHoldingRegisterRequest
 
 from .const import BATTERY_PAUSE_MODES, MAX_BATTERY_LIMIT_PERCENT, MIN_SOC, MODES
 from .data import GivData, battery_limit_percent
-from .modbus import EXTENDED_CHARGE_SLOT_2, SLOT_TARGET_BASE, THREE_PHASE_AC_LIMIT, is_three_phase
+from .modbus import (
+    CAR_CHARGE_BOOST_MAX,
+    EMS_CAR_CHARGE_BOOST,
+    EXTENDED_CHARGE_SLOT_2,
+    SLOT_TARGET_BASE,
+    THREE_PHASE_AC_LIMIT,
+    is_three_phase,
+)
 
 Requests = list[TransparentRequest]
 
@@ -261,6 +269,33 @@ def mode(inv: SinglePhaseInverter, new_mode: str, saved_reserve: int | None = No
     if new_mode == "Timed Export":
         return inv.set_discharge_mode_max_power() + discharge_schedule(inv, True)
     return inv.set_discharge_mode_max_power() + discharge_schedule(inv, False)   # Export (Paused)
+
+
+# --- EMS -----------------------------------------------------------------------------------------------------
+# kind is "charge", "discharge" or "export"
+
+def ems_plant(ems: Ems, enable: bool) -> Requests:
+    return ems.set_ems_plant(enable)
+
+
+def ems_slot_edge(ems: Ems, kind: str, slot: int, edge: str, value) -> Requests:
+    return getattr(ems, f"set_ems_{kind}_slot_{edge}")(int(slot), parse_time(value))
+
+
+def ems_target(ems: Ems, kind: str, slot: int, target: int) -> Requests:
+    return getattr(ems, f"set_ems_{kind}_target_soc")(int(slot), int(target))
+
+
+def ems_export_power_limit(ems: Ems, watts: int) -> Requests:
+    return ems.set_ems_export_power_limit(int(watts))
+
+
+def car_charge_boost(watts: float) -> Requests:
+    """The EMS's car charge boost, HR2073, which the library has no writer for."""
+    watts = int(watts)
+    if not 0 <= watts <= CAR_CHARGE_BOOST_MAX:
+        raise CommandError(f"Car charge boost ({watts}W) must be 0-{CAR_CHARGE_BOOST_MAX}W")
+    return [WriteHoldingRegisterRequest(EMS_CAR_CHARGE_BOOST, watts)]
 
 
 # --- timed operations --------------------------------------------------------------------------------------

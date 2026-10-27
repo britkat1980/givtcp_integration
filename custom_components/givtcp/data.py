@@ -14,7 +14,9 @@ from typing import Any
 
 from givenergy_modbus.model.hv_bcu import Bmu, decode_cells_temps_serial
 from givenergy_modbus.model.battery import State
-from givenergy_modbus.model.inverter import Model, SinglePhaseInverterRegisterGetter, WorkMode
+from givenergy_modbus.model.ems import MAX_MANAGED_INVERTERS, EmsInverterStatus
+from givenergy_modbus.model.inverter import Model, SinglePhaseInverterRegisterGetter, Status, WorkMode
+from givenergy_modbus.model.meter import MeterStatus
 from givenergy_modbus.model.plant import Plant
 from givenergy_modbus.model.register import IR
 from givenergy_modbus.model.register_cache import RegisterCache
@@ -70,6 +72,7 @@ class GivData:
     stacks: dict[str, dict[str, Any]] = field(default_factory=dict)      # "Battery_Stack_1": values
     meters: dict[str, dict[str, Any]] = field(default_factory=dict)      # "Meter_ID1": values
     aios: dict[str, dict[str, Any]] = field(default_factory=dict)        # a Gateway's "AIO_1": values
+    managed: dict[str, dict[str, Any]] = field(default_factory=dict)     # an EMS's inverters, serial: values
     model: InverterModel = field(default_factory=InverterModel)
     slot_count: int = 2
     pause_supported: bool = False
@@ -84,8 +87,6 @@ def unsupported_reason(plant: Plant) -> str | None:
     caps = plant.capabilities
     if caps is None:
         return "not_detected"
-    if caps.is_ems:
-        return "ems"
     device_type = plant.register_caches.get(caps.inverter_address, {}).get(_HR0)
     if device_type is not None and hex(device_type)[2:4] == "23":
         return "pv_inverter"
@@ -276,7 +277,7 @@ def _pack_current_reported(plant: Plant, bms_fw) -> bool:
 
 
 def _timeslot(slot, key: str, previous: GivData | None) -> str:
-    start_end = key.split("_")[1]   # "start" or "end"
+    start_end = "start" if "_start_" in key else "end"
     value = getattr(slot, start_end, None) if slot is not None else None
     if value is not None:
         return value.isoformat()
@@ -583,12 +584,15 @@ def _inverter_time(system_time: datetime | None, previous: GivData | None, timez
     return system_time.replace(tzinfo=timezone)
 
 
-def _enum_name(enum, value) -> str | None:
-    # The Gateway model keeps enums as raw values
-    try:
-        return enum(value).name.replace("_", " ").capitalize() if value is not None else None
-    except ValueError:
+def _enum_name(enum, value, spaces: bool = False) -> str | None:
+    # The Gateway and EMS models keep enums as raw values
+    if value is None:
         return None
+    try:
+        name = enum(value).name
+    except ValueError:
+        return str(value)
+    return (name.replace("_", " ") if spaces else name).capitalize()
 
 
 # The Gateway's All-in-Ones: 6kW and 13.5kWh each
@@ -619,7 +623,7 @@ def build_gateway(plant: Plant, previous: GivData | None, timezone: tzinfo, now:
         "Parallel_Total_AIO_Number": gw.parallel_aio_num,
         "Parallel_Total_AIO_Online_Number": gw.parallel_aio_online_num,
         "Gateway_State": _enum_name(State, gw.aio_state),
-        "Gateway_Mode": _enum_name(WorkMode, gw.work_mode),
+        "Gateway_Mode": _enum_name(WorkMode, gw.work_mode, spaces=True),
         "Export_Limit": hr.grid_port_max_power_output,
         "Battery_Capacity_kWh": m.batterycapacity,
         "Invertor_Max_Inv_Rate": m.invmaxrate,
@@ -834,9 +838,134 @@ def build_three_phase(plant: Plant, previous: GivData | None, timezone: tzinfo,
     return data
 
 
+# The EMS's energy totals and today values, and Total Power, in IR0-59, which the library doesn't model:
+# key: (kind, registers). Energies are 0.1kWh; u32 is high word first, sum adds the registers (one is a generation
+# meter). The generation meters are at IR17/19 and 11/12 (britkat1980/giv_tcp#637)
+EMS_IR_VALUES = {
+    "Generation_Energy_Total_kWh": ("u32", (11, 12)),
+    "Inverter_Out_Energy_Total_kWh": ("u32", (6, 7)),
+    "Inverter_In_Energy_Total_kWh": ("u32", (27, 28)),
+    "Export_Energy_Total_kWh": ("u32", (21, 22)),
+    "Import_Energy_Total_kWh": ("u32", (32, 33)),
+    "Export_Energy_Today_kWh": ("sum", (25,)),
+    "Import_Energy_Today_kWh": ("sum", (26,)),
+    "Inverter_In_Energy_Today_kWh": ("sum", (35,)),
+    "Inverter_Out_Energy_Today_kWh": ("sum", (37,)),
+    "Generation_Energy_Today_kWh": ("sum", (17, 19)),
+    "Total_Power": ("s16", (52,)),      # W
+}
+CAR_CHARGE_MODES = ["Stop", "Eco", "Eco+", "Fast"]
+
+
+def _ems_ir_value(cache, kind: str, regs: tuple[int, ...]):
+    words = [cache.get(IR(r)) for r in regs]
+    if None in words:
+        return None
+    if kind == "s16":
+        return words[0] - 0x10000 if words[0] >= 0x8000 else words[0]
+    if kind == "u32":
+        return round((words[0] << 16 | words[1]) * 0.1, 1)
+    return round(sum(words) * 0.1, 1)
+
+
+def _ems_ir_values(plant: Plant, previous: GivData | None) -> dict[str, Any]:
+    """The EMS_IR_VALUES. The dongle relays the cloud's polls of IR0-59, which are sometimes all zeros, and an
+    EMS's lifetime totals are never all 0, so then keep the previous values rather than publish zeros that Home
+    Assistant takes for a meter reset."""
+    cache = plant.register_caches.get(plant.capabilities.inverter_address, {})
+    values = {key: _ems_ir_value(cache, kind, regs) for key, (kind, regs) in EMS_IR_VALUES.items()}
+    values = {k: v for k, v in values.items() if v is not None}
+    totals = [v for k, v in values.items() if k.endswith("_Total_kWh")]
+    if totals and not any(totals):
+        old = previous.inverter if previous else {}
+        values = {k: old[k] for k in values if k in old}
+    return values
+
+
+def build_ems(plant: Plant, previous: GivData | None, timezone: tzinfo, now: datetime | None = None) -> GivData:
+    """Port of GivTCP's processEMSInfo.
+
+    The library's EMS model covers its own block (HR/IR2040+); its identity, clock and export limit come from the
+    inverter view over the same registers, and its energy from IR0-59. Each inverter it manages is a device of its
+    own, keyed by serial number.
+    """
+    ems, hr = plant.ems, plant.inverter
+    data = GivData(serial=plant.inverter_serial, model=InverterModel(model=Model.EMS), slot_count=3)
+    out = data.inverter
+    now = now or datetime.now(timezone)
+    inv_time = _inverter_time(hr.system_time, previous, timezone, now)
+    out.update({
+        "Invertor_Time": inv_time,
+        "status": _enum_name(Status, ems.ems_status),
+        "Plant_Status": _enum_name(Status, ems.plant_status),
+        "Inverter_Count": ems.inverter_count,
+        "Meter_Count": ems.meter_count,
+        "Car_Charge_Count": ems.expected_car_charger_count,
+        "Serial_Number": data.serial,
+        "Invertor_Serial_Number": data.serial,
+        "Invertor_Type": Model.EMS.name.capitalize(),
+        "Invertor_Firmware": hr.firmware_version,
+        "Remaining_Battery_Wh": ems.remaining_battery_wh,
+        "Export_Limit": hr.grid_port_max_power_output,
+        "Grid_Power": ems.grid_meter_power,
+        "Calculated_Load_Power": ems.calc_load_power,
+        "Measured_Load_Power": ems.measured_load_power,
+        "Generation_Load_Power": ems.total_generation_load_power,
+        "Battery_Power": ems.total_battery_power,
+        "Other_Battery_Power": ems.other_battery_power,
+        # No writer for these in GivTCP, so they're values here rather than controls
+        "Car_Charge_Mode": CAR_CHARGE_MODES[ems.car_charge_mode]
+        if ems.car_charge_mode is not None and 0 <= ems.car_charge_mode < len(CAR_CHARGE_MODES) else ems.car_charge_mode,
+        "Plant_Charge_Compensation": ems.plant_charge_compensation,
+        "Plant_Discharge_Compensation": ems.plant_discharge_compensation,
+    })
+    out.update(_ems_ir_values(plant, previous))
+    for n in range(1, 9):
+        out[f"Meter_{n}_Power"] = getattr(ems, f"meter_{n}_power", None)
+        out[f"Meter_{n}_Status"] = _enum_name(MeterStatus, getattr(ems, f"meter_{n}_status", None))
+
+    for n in range(1, MAX_MANAGED_INVERTERS + 1):
+        serial = (getattr(ems, f"inverter_{n}_serial_number", None) or "").strip("\x00 ")
+        if not serial:
+            continue
+        suspected = getattr(ems, f"inverter_{n}_suspected_status", None)
+        status = _enum_name(EmsInverterStatus, suspected) if suspected is not None else None
+        data.managed[serial] = {k: v for k, v in {
+            "Power": getattr(ems, f"inverter_{n}_power", None),
+            "SOC": getattr(ems, f"inverter_{n}_soc", None),
+            "Temperature": getattr(ems, f"inverter_{n}_temp", None),
+            "Serial_Number": serial,
+            # The raw status code is undocumented: the library's suspected label where it knows it
+            "status": status or getattr(ems, f"inverter_{n}_status", None),
+        }.items() if v is not None}
+
+    controls: dict[str, Any] = {"Plant_Control": _flag(ems.plant_enabled, previous, "Plant_Control")}
+    for n in (1, 2, 3):
+        controls[f"EMS_Discharge_Target_SOC_{n}"] = getattr(ems, f"discharge_target_{n}", None)
+        controls[f"EMS_Charge_Target_SOC_{n}"] = getattr(ems, f"charge_target_{n}", None)
+        controls[f"Export_Target_SOC_{n}"] = getattr(ems, f"export_target_{n}", None)
+    controls["Export_Power_Limit"] = ems.export_power_limit
+    controls["Car_Charge_Boost"] = ems.car_charge_boost
+    data.controls = {k: v for k, v in controls.items() if v is not None}
+
+    for prefix, attr in (("EMS_Discharge", "discharge_slot_"), ("EMS_Charge", "charge_slot_"), ("Export", "export_slot_")):
+        for n in (1, 2, 3):
+            slot = getattr(ems, f"{attr}{n}", None)
+            for edge in ("start", "end"):
+                key = f"{prefix}_{edge}_time_slot_{n}"
+                data.timeslots[key] = _timeslot(slot, key, previous)
+
+    get_meters(plant, data)
+    _guard_energy(out, previous, inv_time)
+    data.inverter = {k: v for k, v in out.items() if v is not None}
+    return data
+
+
 def build(plant: Plant, previous: GivData | None, timezone: tzinfo, now: datetime | None = None) -> GivData:
-    """Port of GivTCP's processInverterInfo for single-phase inverters, processGatewayInfo for a Gateway, or
-    processThreePhaseInfo for three-phase."""
+    """Port of GivTCP's processInverterInfo for single-phase inverters, processGatewayInfo for a Gateway,
+    processThreePhaseInfo for three-phase, or processEMSInfo for an EMS."""
+    if plant.capabilities.is_ems:
+        return build_ems(plant, previous, timezone, now)
     if plant.capabilities.is_gateway:
         return build_gateway(plant, previous, timezone, now)
     if plant.capabilities.is_three_phase:

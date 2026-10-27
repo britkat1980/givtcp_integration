@@ -25,6 +25,8 @@ CONTROLS: dict[str, Callable[[GivTCPCoordinator, bool], Requests]] = {
     "Force_Charge_Enable": lambda c, on: commands.force_charge_enable(c.inverter, on),
     "Force_Discharge_Enable": lambda c, on: commands.force_discharge_enable(c.inverter, on),
     "Force_AC_Charge_Enable": lambda c, on: commands.ac_charge_enable(c.inverter, on),
+    # EMS
+    "Plant_Control": lambda c, on: commands.ems_plant(c.ems, on),
 }
 
 

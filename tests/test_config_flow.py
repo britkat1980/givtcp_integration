@@ -73,15 +73,18 @@ async def test_next_prefix(hass: HomeAssistant, existing, expected) -> None:
 
 
 async def test_unsupported(hass: HomeAssistant) -> None:
-    mock, host, port = await serve("ems")
+    """Only PV-only inverters aren't supported, and there's no capture of one, so a Gen 2 stands in."""
+    mock, host, port = await serve("hybrid_gen2")
     try:
         result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_HOST: host, CONF_PORT: port})
+        with patch(f"{FLOW}.unsupported_reason", return_value="pv_inverter"):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], {CONF_HOST: host, CONF_PORT: port})
     finally:
         await mock.aclose()
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "unsupported"}
-    assert result["description_placeholders"]["reason"] == "ems"
+    assert result["description_placeholders"]["reason"] == "pv_inverter"
 
 
 async def test_cannot_connect(hass: HomeAssistant) -> None:

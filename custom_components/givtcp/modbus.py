@@ -19,6 +19,8 @@ Home Assistant may use the library too. Remove each one once the library support
 - Three-phase slots 3-10 and per-slot targets: the library has their layout but doesn't read HR240-299, or allow
   the targets to be written. And three-phase charge/discharge rates, HR1110 / HR1108, which it reads but doesn't
   allow to be written.
+- The EMS's IR0-59, its energy totals and today values and its Total Power, which the library doesn't poll on an
+  EMS: read after each refresh(). And its car charge boost, HR2073, 0-22000W, which it reads but has no writer for.
 - AC charge/discharge rate, HR313/314, on the Gateway (its rate controls, givenergy-modbus#373), Gen 1, Gen 3 and
   All in One-HY, also read after load_config() as the library only reads them on models with the AC config block.
 - HV battery modules in the second and later stacks. The library looks for them at the next device addresses
@@ -57,6 +59,8 @@ AC_LIMIT_REGISTERS = frozenset({313, 314})
 AC_LIMIT_MODELS = frozenset({Model.GATEWAY, Model.HYBRID_GEN1, Model.HYBRID_GEN3, Model.ALL_IN_ONE_HYBRID})
 # Three-phase charge/discharge rate, a percentage of the battery rate
 THREE_PHASE_AC_LIMIT = {"charge": 1110, "discharge": 1108}
+EMS_CAR_CHARGE_BOOST = 2073
+CAR_CHARGE_BOOST_MAX = 22000
 # The model the library is shown, where it reads the real one wrongly
 LIBRARY_MODEL = {Model.ALL_IN_ONE_HYBRID: Model.HYBRID_HV_GEN3}
 HV_BMU_BASE_ADDRESS = 0x50
@@ -64,7 +68,8 @@ HV_STACK_REGISTER_STRIDE = 120
 
 # The PDU also checks writes against the library's global set. Adding to it allows nothing on its own: each
 # client's per-model set still has to include the register
-write_registers.WRITE_SAFE_REGISTERS.update(SLOT_TARGET_REGISTERS, EXTENDED_CHARGE_SLOT_2, THREE_PHASE_AC_LIMIT.values())
+write_registers.WRITE_SAFE_REGISTERS.update(SLOT_TARGET_REGISTERS, EXTENDED_CHARGE_SLOT_2, THREE_PHASE_AC_LIMIT.values(),
+                                            {EMS_CAR_CHARGE_BOOST})
 
 # An extra read that fails this many times in a row isn't tried again until the integration reloads: the inverter
 # doesn't support it. Fewer is a busy or briefly offline dongle
@@ -126,6 +131,8 @@ def extra_write_registers(model: Model | None, arm_fw) -> frozenset[int]:
         extra |= AC_LIMIT_REGISTERS
     if is_three_phase(model):
         extra |= set(THREE_PHASE_AC_LIMIT.values())
+    if model == Model.EMS:
+        extra.add(EMS_CAR_CHARGE_BOOST)
     return frozenset(extra)
 
 
@@ -206,6 +213,15 @@ class GivTCPClient(Client):
                  ReadInputRegistersRequest(base_register=base, register_count=60, device_address=address))
                 for offset, k, address, base in hv_stack_modules(self.plant.capabilities) if offset > 0]
 
+    def _live_reads(self) -> list[tuple[str, TransparentRequest]]:
+        """Live values the library doesn't read on this model, read after each refresh()."""
+        reads = self._stack_module_reads()
+        if self.model == Model.EMS:
+            # Its energy totals and today values and Total Power
+            reads.append(("EMS energy, IR0-59", ReadInputRegistersRequest(
+                base_register=0, register_count=60, device_address=self.plant.capabilities.inverter_address)))
+        return reads
+
     def skip_library_stack_reads(self) -> None:
         """Stop the library polling later stacks' modules where it looks for them, which hold nothing.
 
@@ -248,7 +264,7 @@ class GivTCPClient(Client):
         try:
             result = await super().refresh(*args, **kwargs)
         except RefreshPartiallySucceeded:
-            await self._do_extra_reads(self._stack_module_reads())
+            await self._do_extra_reads(self._live_reads())
             raise
-        await self._do_extra_reads(self._stack_module_reads())
+        await self._do_extra_reads(self._live_reads())
         return result

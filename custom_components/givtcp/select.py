@@ -30,6 +30,11 @@ from .entity import GivTCPEntity, add_entities_as_found
 
 SLOT_KEY = re.compile(r"(Charge|Discharge)_(start|end)_time_slot_(\d+)")
 PAUSE_SLOT_KEY = re.compile(r"Battery_pause_(start|end)_time_slot")
+EMS_SLOT_KEY = re.compile(r"(EMS_Charge|EMS_Discharge|Export)_(start|end)_time_slot_(\d)")
+
+
+def is_slot_key(key: str) -> bool:
+    return any(pattern.fullmatch(key) for pattern in (SLOT_KEY, PAUSE_SLOT_KEY, EMS_SLOT_KEY))
 
 
 def slot_write(key: str) -> Callable[[GivTCPCoordinator, str], Requests]:
@@ -37,6 +42,10 @@ def slot_write(key: str) -> Callable[[GivTCPCoordinator, str], Requests]:
     if match := SLOT_KEY.fullmatch(key):
         kind, edge, n = match.group(1).lower(), match.group(2), int(match.group(3))
         return lambda c, value: commands.slot_edge(c.inverter, c.data, kind, n, edge, value)
+    if match := EMS_SLOT_KEY.fullmatch(key):
+        kind = match.group(1).removeprefix("EMS_").lower()
+        edge, n = match.group(2), int(match.group(3))
+        return lambda c, value: commands.ems_slot_edge(c.ems, kind, n, edge, value)
     edge = PAUSE_SLOT_KEY.fullmatch(key).group(1)
     return lambda c, value: commands.pause_slot_edge(edge, value)
 
@@ -65,7 +74,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,
 
     def candidates(data: GivData):
         for key in [*data.controls, *data.timeslots]:
-            if key not in factories and (SLOT_KEY.fullmatch(key) or PAUSE_SLOT_KEY.fullmatch(key)):
+            if key not in factories and is_slot_key(key):
                 control(key, TIME_SLOTS, slot_write(key), "00:00")
             if key in factories:
                 yield key, factories[key]

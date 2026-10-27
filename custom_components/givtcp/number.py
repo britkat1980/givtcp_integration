@@ -27,6 +27,7 @@ class NumberControl:
     max: float | Callable[[GivData], float] = 100
     probe: float = 50        # a valid value, to check the inverter accepts the write
     device_class: NumberDeviceClass | None = None
+    mode: NumberMode = NumberMode.SLIDER
 
 
 def _max_bat_rate(data: GivData) -> float:
@@ -54,6 +55,15 @@ CONTROLS = [
     *(_soc(f"{kind.capitalize()}_Target_SOC_{n}",
            lambda c, v, kind=kind, n=n: commands.slot_target(kind, n, v))
       for kind in ("charge", "discharge") for n in range(1, 11)),
+    # EMS
+    *(_soc(f"{prefix}_Target_SOC_{n}", lambda c, v, kind=kind, n=n: commands.ems_target(c.ems, kind, n, v))
+      for prefix, kind in (("EMS_Charge", "charge"), ("EMS_Discharge", "discharge"), ("Export", "export"))
+      for n in (1, 2, 3)),
+    NumberControl(key="Export_Power_Limit", unit=UnitOfPower.WATT, min=0, max=65535, probe=1000,
+                  device_class=NumberDeviceClass.POWER, mode=NumberMode.BOX,
+                  write=lambda c, v: commands.ems_export_power_limit(c.ems, v)),
+    NumberControl(key="Car_Charge_Boost", unit=UnitOfPower.WATT, min=0, max=22000, probe=1000,
+                  device_class=NumberDeviceClass.POWER, write=lambda c, v: commands.car_charge_boost(v)),
 ]
 BY_KEY = {control.key: control for control in CONTROLS}
 
@@ -77,7 +87,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: GivTCPConfigEntry,
 class GivTCPNumber(GivTCPEntity, NumberEntity):
     """A GivTCP number control."""
 
-    _attr_mode = NumberMode.SLIDER
     _attr_native_step = 1
 
     def __init__(self, coordinator: GivTCPCoordinator, control: NumberControl) -> None:
@@ -86,6 +95,7 @@ class GivTCPNumber(GivTCPEntity, NumberEntity):
         self._attr_native_unit_of_measurement = control.unit
         self._attr_native_min_value = control.min
         self._attr_device_class = control.device_class
+        self._attr_mode = control.mode
 
     @property
     def native_max_value(self) -> float:
